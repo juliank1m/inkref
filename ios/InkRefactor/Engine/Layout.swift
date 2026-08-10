@@ -1,0 +1,573 @@
+import Foundation
+
+/// Structure detection and the layout plan. Pure geometry — knows no file format.
+///
+/// Input is a list of stroke bounding boxes. Output is one `Offset` per stroke.
+///
+/// Everything this file produces is a **translation**. Nothing here scales, rotates or
+/// regenerates a stroke, so whatever the caller applies the offsets to keeps its own shape
+/// exactly. That is the product's core promise (SPEC §7) and it is also what makes the
+/// GoodNotes side safe: translating a record is the one edit confirmed in the app to leave
+/// ink lasso-selectable, erasable and undeformed (FINDINGS, milestone 1).
+///
+///     boxes -> rows (lines) -> words -> baselines, pitch, indent levels, word gap
+///           -> per-word (dx, dy)
+///
+/// Thresholds are multiples of `refH`, the page's writing height, so the same numbers work
+/// at any pen size or page scale.
+
+// Tunables, all multiples of refH unless noted. These match inkport/ink/layout.py exactly;
+// a divergence between the two implementations is a bug, not a port decision.
+private let rowBaselineTol = 0.45      // a stroke joins a row if its bottom is this close to it
+private let rowOverlap = 0.50          // ...or if it vertically overlaps the row this much
+private let wordGapMin = 0.55          // a gap must beat this (and 1.8x the median gap) to split words
+private let wordGapMedianFactor = 1.8
+// ponytail: single-link clustering of line starts. Fine when indents are a clear step apart;
+// if drift approaches the indent step the levels merge and lines are pulled to the body
+// margin — conservative, but mode-seeking or gap-statistic clustering would do better.
+private let indentTol = 0.90           // line starts within this of each other are one indent level
+private let minLineGap = 0.35          // of pitch — line spacing may never collapse below this
+private let paraRatio = 1.70           // a line gap wider than this x pitch reads as a section break
+private let tallRatio = 0.45           // a stroke this tall relative to refH actually sits on the baseline
+private let headingLead = 1.35         // of pitch — room opened above a heading
+private let headingTrail = 1.15        // ...and below it
+private let markMaxWidth = 0.90        // a first word narrower than this may be a bullet mark
+
+public enum InkLayout {
+
+    /// A (deadband, gain) pair per transform.
+    ///
+    /// deadband: error smaller than this is left alone, so natural variation survives.
+    /// gain: fraction of the error *beyond* the deadband that is corrected.
+    ///
+    /// Only the excess is corrected, which keeps the response continuous — no visible jump
+    /// for a stroke that happens to sit right on the threshold.
+    /// Identity is the name alone: two strengths with the same name are the same setting,
+    /// which is what a picker selection has to mean.
+    public struct Strength: Sendable, Identifiable, Hashable {
+        public var id: String { name }
+
+        public static func == (a: Strength, b: Strength) -> Bool { a.name == b.name }
+        public func hash(into hasher: inout Hasher) { hasher.combine(name) }
+
+        public let name: String
+        public let baseline: (deadband: Double, gain: Double)   // deadband x refH
+        public let line: (deadband: Double, gain: Double)       // deadband x pitch
+        public let margin: (deadband: Double, gain: Double)     // deadband x refH
+        public let spacing: (deadband: Double, gain: Double)    // deadband x refH
+        public let paraRatio: Double    // a line gap wider than this x pitch is a deliberate break
+        public let maxShift: Double     // hard cap on |dx| and |dy|, x refH
+
+        public init(name: String,
+                    baseline: (deadband: Double, gain: Double),
+                    line: (deadband: Double, gain: Double),
+                    margin: (deadband: Double, gain: Double),
+                    spacing: (deadband: Double, gain: Double),
+                    paraRatio: Double, maxShift: Double) {
+            self.name = name; self.baseline = baseline; self.line = line
+            self.margin = margin; self.spacing = spacing
+            self.paraRatio = paraRatio; self.maxShift = maxShift
+        }
+
+        // Deadbands are sized against the defects they exist to tolerate, not picked to look
+        // cautious: handwriting wobbles off its baseline by roughly 0.1-0.2 of the writing
+        // height, drifts off a margin by 0.3-0.6, and varies word gaps by 0.3-0.5. A deadband
+        // set above that band does nothing at all, which is how these were first mis-tuned.
+        public static let light = Strength(
+            name: "light", baseline: (0.18, 0.55), line: (0.28, 0.50),
+            margin: (0.50, 0.50), spacing: (0.45, 0.45), paraRatio: 1.8, maxShift: 2.0)
+        public static let balanced = Strength(
+            name: "balanced", baseline: (0.06, 0.85), line: (0.10, 0.80),
+            margin: (0.18, 0.80), spacing: (0.18, 0.75), paraRatio: 1.7, maxShift: 4.0)
+        public static let strong = Strength(
+            name: "strong", baseline: (0.02, 1.00), line: (0.03, 1.00),
+            margin: (0.05, 1.00), spacing: (0.05, 1.00), paraRatio: 1.6, maxShift: 6.0)
+
+        public static let all: [Strength] = [light, balanced, strong]
+
+        public static func named(_ s: String) -> Strength? {
+            let key = s.lowercased()
+            return all.first { $0.name == key }
+        }
+    }
+
+    public struct Word: Sendable {
+        public let indices: [Int]     // indices into the caller's box list
+        public let box: InkBox
+        public let baseline: Double   // median stroke bottom
+
+        public init(indices: [Int], box: InkBox, baseline: Double) {
+            self.indices = indices; self.box = box; self.baseline = baseline
+        }
+    }
+
+    public struct Line: Sendable {
+        public var words: [Word]
+        public var box: InkBox
+        public var baseline: Double
+        public var level: Int         // indent level, filled in by analyze()
+
+        public init(words: [Word], box: InkBox, baseline: Double, level: Int = 0) {
+            self.words = words; self.box = box; self.baseline = baseline; self.level = level
+        }
+
+        public var indices: [Int] { words.flatMap(\.indices) }
+    }
+
+    public struct Analysis: Sendable {
+        public var lines: [Line] = []
+        public var refH: Double = 1.0
+        public var pitch: Double = 1.0
+        public var levels: [Double] = []   // x of each indent level
+        public var wordGap: Double = 0.0   // target gap between words
+        public var boxCount: Int = 0
+
+        public init() {}
+
+        public var words: [Word] { lines.flatMap(\.words) }
+    }
+
+    // MARK: - structure
+
+    /// `boxes` -> `Analysis`. Empty input gives an empty Analysis.
+    public static func analyze(_ boxes: [InkBox]) -> Analysis {
+        var a = Analysis()
+        a.boxCount = boxes.count
+        guard !boxes.isEmpty else { return a }
+
+        a.refH = refHeight(boxes)
+
+        var lines: [Line] = []
+        for row in rowsOf(boxes, a.refH) {
+            // A row of unusually small writing gets its own word-split threshold; falling
+            // back to the page height would glue its words together.
+            let rh = refHeight(row.map { boxes[$0] })
+            let rowH = rh == 0 ? a.refH : rh
+            let words = wordsOf(row, boxes, rowH).map { w in
+                Word(indices: w, box: InkBox.union(w.map { boxes[$0] }),
+                     baseline: baselineOf(w, boxes, a.refH))
+            }
+            lines.append(Line(words: words,
+                              box: InkBox.union(row.map { boxes[$0] }),
+                              baseline: baselineOf(row, boxes, a.refH)))
+        }
+        a.lines = stableSorted(lines) { $0.baseline }
+
+        let diffs = zip(a.lines, a.lines.dropFirst())
+            .map { $1.baseline - $0.baseline }.filter { $0 > 0 }
+        a.pitch = diffs.isEmpty ? a.refH * 1.6 : median(diffs)
+
+        a.levels = levelsOf(a.lines.map { $0.box.x0 }, indentTol * a.refH)
+        for k in a.lines.indices {
+            let x = a.lines[k].box.x0
+            a.lines[k].level = a.levels.indices
+                .min { abs(a.levels[$0] - x) < abs(a.levels[$1] - x) } ?? 0
+        }
+
+        var gaps: [Double] = []
+        for line in a.lines {
+            for k in 0..<Swift.max(0, line.words.count - 1) {
+                gaps.append(line.words[k + 1].box.x0 - line.words[k].box.x1)
+            }
+        }
+        let positive = gaps.filter { $0 > 0 }
+        let target = positive.isEmpty ? 0.6 * a.refH : median(positive)
+        a.wordGap = Swift.min(Swift.max(target, 0.40 * a.refH), 1.50 * a.refH)
+        return a
+    }
+
+    // MARK: - planning
+
+    /// `Analysis` -> offsets parallel to the original box list.
+    ///
+    /// All translations, composed per word:
+    ///   line spacing   (SPEC §8.6)  vertical, whole line
+    ///   baseline align (SPEC §8.4)  vertical, per word within its line
+    ///   margin align   (SPEC §8.7)  horizontal, whole line, toward its indent level
+    ///   word spacing   (SPEC §8.5)  horizontal, cumulative along the line
+    ///
+    /// `roles` is one role per line, in `a.lines` order — usually from the AI layer, and
+    /// `nil` means treat everything as prose. A role never supplies a coordinate; it only
+    /// chooses which of the rules above apply, which is the whole point of the split.
+    public static func plan(_ a: Analysis,
+                            strength s: Strength = .balanced,
+                            roles: [Role]? = nil) -> [Offset] {
+        var offsets = [Offset](repeating: Offset(), count: a.boxCount)
+        guard !a.lines.isEmpty else { return offsets }
+        let role = roleLookup(roles)
+
+        let targets = lineTargets(a.lines.map(\.baseline), a.pitch, s, role)
+        let bullets = bulletOffsets(a, role)
+        let cap = s.maxShift * a.refH
+
+        for (k, line) in a.lines.enumerated() {
+            let r = role(k)
+            if r.isFrozen { continue }              // keeps Offset(): never touched
+            let ldy = targets[k] - line.baseline
+            let levelX = a.levels.indices.contains(line.level) ? a.levels[line.level] : line.box.x0
+            let ldx = correct(levelX - line.box.x0, s.margin.deadband * a.refH, s.margin.gain)
+            let hang = bullets[line.level]
+            let listed = r == .bullet && hang != nil && line.words.count >= 2
+                && isMark(line.words[0], a.refH)
+
+            var shift = 0.0
+            var prevRight: Double? = nil
+            for (wi, w) in line.words.enumerated() {
+                if let pr = prevRight {
+                    if listed, wi == 1, let hang {
+                        // hang the item text off a shared offset instead of a generic gap,
+                        // so a list reads as a column (SPEC §17.2)
+                        let want = levelX + hang
+                        shift = correct(want - (w.box.x0 + ldx),
+                                        s.spacing.deadband * a.refH, s.spacing.gain)
+                    } else {
+                        shift += correct(a.wordGap - (w.box.x0 - pr),
+                                         s.spacing.deadband * a.refH, s.spacing.gain)
+                    }
+                }
+                prevRight = w.box.x1
+
+                // A word too short to reach the baseline — a hyphen, a dot, an accent — has
+                // no baseline of its own to trust, so it rides with its line and nothing else.
+                var wdy = 0.0
+                if w.box.height >= tallRatio * a.refH {
+                    wdy = correct(line.baseline - w.baseline,
+                                  s.baseline.deadband * a.refH, s.baseline.gain)
+                }
+
+                let dx = clamp(ldx + shift, cap)
+                let dy = clamp(ldy + wdy, cap)
+                for i in w.indices where offsets.indices.contains(i) {
+                    offsets[i] = Offset(dx: dx, dy: dy)
+                }
+            }
+        }
+        return offsets
+    }
+
+    // MARK: - measuring the result
+
+    /// Numbers that should go DOWN when a page gets cleaner.
+    ///
+    /// Gaps the engine is *supposed* to leave irregular — a section break, the extra room
+    /// around a heading — are excluded. Counting them would score a page as ragged exactly
+    /// because its structure was preserved, which is the opposite of the truth.
+    public static func metrics(_ boxes: [InkBox],
+                               analysis: Analysis? = nil,
+                               roles: [Role]? = nil) -> LayoutMetrics {
+        let a = analysis ?? analyze(boxes)
+        guard !a.lines.isEmpty else { return LayoutMetrics() }
+        let role = roleLookup(roles)
+
+        var bs: [Double] = [], ps: [Double] = [], ms: [Double] = [], gs: [Double] = []
+        for line in a.lines {
+            for i in line.indices where boxes.indices.contains(i) {
+                guard boxes[i].height >= tallRatio * a.refH else { continue }
+                bs.append(abs(boxes[i].y1 - line.baseline))
+            }
+            if a.levels.indices.contains(line.level) {
+                ms.append(abs(line.box.x0 - a.levels[line.level]))
+            }
+            for k in 0..<Swift.max(0, line.words.count - 1) {
+                gs.append(abs((line.words[k + 1].box.x0 - line.words[k].box.x1) - a.wordGap))
+            }
+        }
+        for k in 0..<(a.lines.count - 1) {
+            let d = a.lines[k + 1].baseline - a.lines[k].baseline
+            guard d <= paraRatio * a.pitch,
+                  role(k) != .heading, role(k + 1) != .heading else { continue }
+            ps.append(abs(d - a.pitch))
+        }
+        func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
+        return LayoutMetrics(baselineSpread: mean(bs), pitchSpread: mean(ps),
+                             marginSpread: mean(ms), gapSpread: mean(gs))
+    }
+
+    /// The page as a classifier sees it: one record per detected line, geometry only.
+    /// Every id a model may answer with appears here, so an answer naming anything else is
+    /// provably invented and gets dropped.
+    public static func describe(_ a: Analysis) -> [BlockDescription] {
+        a.lines.enumerated().map { k, line in
+            BlockDescription(
+                id: "L\(k)",
+                bbox: [line.box.x0, line.box.y0, line.box.x1, line.box.y1].map { round($0, 1) },
+                words: line.words.count,
+                strokes: line.indices.count,
+                heightRatio: a.refH == 0 ? 0 : round(line.box.height / a.refH, 2),
+                indentLevel: line.level,
+                gapAbove: k == 0 ? nil
+                    : round((line.baseline - a.lines[k - 1].baseline) / a.pitch, 2),
+                startsWithMark: line.words.count >= 2 && isMark(line.words[0], a.refH),
+                nearby: [k - 1, k + 1].filter { $0 >= 0 && $0 < a.lines.count }.map { "L\($0)" })
+        }
+    }
+
+    public static func moved(_ boxes: [InkBox], _ offsets: [Offset]) -> [InkBox] {
+        zip(boxes, offsets).map { $0.offset(by: $1) }
+    }
+}
+
+// MARK: - geometry helpers
+
+/// Estimate the writing height from stroke boxes.
+///
+/// A plain median is wrong here: an 'A' crossbar, an 'i' dot and a hyphen are separate
+/// strokes of nearly zero height, and in a page of print-style handwriting they can
+/// outnumber the full-height ones. Take a near-maximum first, then the median of the
+/// strokes within reach of it — the letters that actually span the writing height.
+private func refHeight(_ boxes: [InkBox]) -> Double {
+    let hs = boxes.map(\.height).filter { $0 > 0 }.sorted()
+    guard !hs.isEmpty else { return 1.0 }
+    let big = hs[Swift.min(hs.count - 1, Int(Double(hs.count) * 0.9))]   // robust near-max
+    let tall = hs.filter { $0 >= 0.35 * big }
+    return tall.isEmpty ? big : median(tall)
+}
+
+/// Where a group of strokes sits. Bars and dots are excluded for the same reason.
+private func baselineOf(_ idxs: [Int], _ boxes: [InkBox], _ refH: Double) -> Double {
+    let bottoms = idxs.filter { boxes[$0].height >= tallRatio * refH }.map { boxes[$0].y1 }
+    return median(bottoms.isEmpty ? idxs.map { boxes[$0].y1 } : bottoms)
+}
+
+/// Group stroke indices into text rows.
+///
+/// Two passes, and the order matters. Full-height strokes seed the rows first, sorted by
+/// bottom edge — a baseline is what a row actually shares, and a bottom edge barely moves
+/// where a y-centre swings with ascenders. Only then are the short strokes attached: a
+/// crossbar, a dot, a hyphen, the top bar of a `T`. Those carry no baseline of their own,
+/// and seeding a row with one puts a row 22 pt above the text it belongs to, which then
+/// refuses every real letter that arrives after it.
+private func rowsOf(_ boxes: [InkBox], _ refH: Double) -> [[Int]] {
+    var tall = boxes.indices.filter { boxes[$0].height >= tallRatio * refH }
+    if tall.isEmpty { tall = Array(boxes.indices) }   // a page of dots; nothing better to do
+    let tallSet = Set(tall)
+    let short = boxes.indices.filter { !tallSet.contains($0) }
+
+    var rows: [[Int]] = []
+    for i in stableSorted(tall, by: { boxes[$0].y1 }) {
+        let b = boxes[i]
+        var best: Int? = nil
+        var bestErr = Double.infinity
+        for (r, row) in rows.enumerated() {
+            let rb = baselineOf(row, boxes, refH)
+            let rbox = InkBox.union(row.map { boxes[$0] })
+            let overlap = Swift.min(b.y1, rbox.y1) - Swift.max(b.y0, rbox.y0)
+            let h = Swift.min(b.height, rbox.height)
+            let err = abs(b.y1 - rb)
+            let fits = err <= rowBaselineTol * refH || (h > 0 && overlap / h >= rowOverlap)
+            if fits && err < bestErr { best = r; bestErr = err }
+        }
+        if let best { rows[best].append(i) } else { rows.append([i]) }
+    }
+
+    for i in stableSorted(short, by: { boxes[$0].y1 }) {
+        let b = boxes[i]
+        var best: Int? = nil
+        var bestScore = 0.0
+        for (r, row) in rows.enumerated() {
+            let rbox = InkBox.union(row.map { boxes[$0] })
+            let score = Swift.min(b.y1, rbox.y1) - Swift.max(b.y0, rbox.y0)  // overlap, in points
+            if score > bestScore { best = r; bestScore = score }
+        }
+        if best == nil {                                 // not inside any row: nearest one
+            var nearest: Int? = nil
+            var nearestD = Double.infinity
+            for (r, row) in rows.enumerated() {
+                let d = abs(b.centerY - baselineOf(row, boxes, refH))
+                if d <= 1.5 * refH && d < nearestD { nearest = r; nearestD = d }
+            }
+            best = nearest
+        }
+        if let best { rows[best].append(i) } else { rows.append([i]) }
+    }
+    return rows
+}
+
+/// Split one row into words at horizontal gaps.
+///
+/// Threshold is the larger of a fixed fraction of the row height and a multiple of the
+/// row's own median gap, so it adapts to both cramped and airy handwriting.
+private func wordsOf(_ indices: [Int], _ boxes: [InkBox], _ rowH: Double) -> [[Int]] {
+    let idxs = stableSorted(indices, by: { boxes[$0].x0 })
+    guard let first = idxs.first else { return [] }
+
+    var gaps: [Double] = []
+    var reach = boxes[first].x1
+    for i in idxs.dropFirst() {
+        gaps.append(Swift.max(0, boxes[i].x0 - reach))
+        reach = Swift.max(reach, boxes[i].x1)
+    }
+    var thr = wordGapMin * rowH
+    if !gaps.isEmpty { thr = Swift.max(thr, wordGapMedianFactor * median(gaps)) }
+
+    var words: [[Int]] = []
+    var cur = [first]
+    reach = boxes[first].x1
+    for i in idxs.dropFirst() {
+        if boxes[i].x0 - reach > thr { words.append(cur); cur = [] }
+        cur.append(i)
+        reach = Swift.max(reach, boxes[i].x1)
+    }
+    words.append(cur)
+    return words
+}
+
+/// Single-link cluster of line-start x positions -> one x per indent level.
+///
+/// Clustering rather than one global margin means an indented bullet list keeps its indent
+/// instead of being dragged out to the body margin (SPEC §8.7, §17.2).
+private func levelsOf(_ xs: [Double], _ tol: Double) -> [Double] {
+    let sorted = xs.sorted()
+    guard let first = sorted.first else { return [] }
+    var out: [Double] = []
+    var cur = [first]
+    for x in sorted.dropFirst() {
+        if x - (cur.last ?? x) > tol { out.append(median(cur)); cur = [] }
+        cur.append(x)
+    }
+    out.append(median(cur))
+    return out
+}
+
+// MARK: - planning helpers
+
+/// Correct only the part of `err` that exceeds the deadband, so the response stays
+/// continuous — no visible jump for a stroke sitting right on the threshold.
+private func correct(_ err: Double, _ deadband: Double, _ gain: Double) -> Double {
+    abs(err) <= deadband ? 0 : gain * (err - (err < 0 ? -deadband : deadband))
+}
+
+private func clamp(_ v: Double, _ cap: Double) -> Double { Swift.max(-cap, Swift.min(cap, v)) }
+
+/// A lone bullet, dash or number that introduces a list item.
+private func isMark(_ w: InkLayout.Word, _ refH: Double) -> Bool {
+    w.box.width <= markMaxWidth * refH
+}
+
+/// Lenient by index: a missing or short `roles` array reads as prose everywhere.
+private func roleLookup(_ roles: [Role]?) -> (Int) -> Role {
+    { k in
+        guard let roles, k >= 0, k < roles.count else { return .paragraph }
+        return roles[k]
+    }
+}
+
+/// New baseline per line. Ordering is preserved by construction.
+///
+/// A gap wider than `paraRatio x pitch` is read as a deliberate section break and left
+/// alone — normalising every gap to one pitch would erase the page's structure. A heading
+/// gets more room above and below it than body text does, and a frozen line simply keeps
+/// the position it already had.
+private func lineTargets(_ baselines: [Double], _ pitch: Double,
+                         _ s: InkLayout.Strength, _ role: (Int) -> Role) -> [Double] {
+    guard let first = baselines.first else { return [] }
+    var out = [first]
+    let (dead, gain) = s.line
+    for k in 1..<baselines.count {
+        if role(k).isFrozen { out.append(baselines[k]); continue }
+        let gap = baselines[k] - baselines[k - 1]
+        let lead = role(k) == .heading ? headingLead
+            : (role(k - 1) == .heading ? headingTrail : 1.0)
+        let want = gap > s.paraRatio * pitch ? gap : pitch * lead
+        let new = gap + correct(want - gap, dead * pitch, gain)
+        out.append((out.last ?? first) + Swift.max(new, minLineGap * pitch))
+    }
+    // A frozen line is an anchor the accumulation above it knows nothing about, so it is
+    // the one way ordering can break: lines opened up higher on the page walk straight down
+    // onto ink that never moves. Pull them back off it first (a no-op on an all-prose page,
+    // where the forward accumulation already spaces every line by at least the floor), then
+    // re-run the forward pass.
+    for k in stride(from: out.count - 1, to: 0, by: -1) where !role(k - 1).isFrozen {
+        out[k - 1] = Swift.min(out[k - 1], out[k] - minLineGap * pitch)
+    }
+    for k in 1..<Swift.max(1, out.count) where !role(k).isFrozen {   // never overtake the line above
+        out[k] = Swift.max(out[k], out[k - 1] + minLineGap * pitch)
+    }
+    return out
+}
+
+/// Per indent level, where list text starts relative to the level. Median, so one badly
+/// placed item cannot drag the whole list.
+private func bulletOffsets(_ a: InkLayout.Analysis, _ role: (Int) -> Role) -> [Int: Double] {
+    var found: [Int: [Double]] = [:]
+    for (k, line) in a.lines.enumerated() where role(k) == .bullet {
+        guard line.words.count >= 2, isMark(line.words[0], a.refH),
+              a.levels.indices.contains(line.level) else { continue }
+        found[line.level, default: []].append(line.words[1].box.x0 - a.levels[line.level])
+    }
+    return found.mapValues(median)
+}
+
+// MARK: - small utilities
+
+/// Swift's `sort` is not guaranteed stable; the Python reference relies on stability for
+/// tie-breaking (equal bottoms keep original stroke order), so ties fall back to position.
+private func stableSorted<T>(_ items: [T], by key: (T) -> Double) -> [T] {
+    items.enumerated().sorted { a, b in
+        let (ka, kb) = (key(a.element), key(b.element))
+        return ka == kb ? a.offset < b.offset : ka < kb
+    }.map(\.element)
+}
+
+/// Must agree with Python's `round(v, n)` digit for digit: `describe` is the payload a
+/// model sees and the cross-check diffs it against the reference. Scaling by 10^n and
+/// rounding cannot do that — it rounds the scaled product, not the value, so 0.35 (whose
+/// double is just *under* 0.35) scales to exactly 3.5 and rounds up to 0.4 where Python
+/// gives 0.3. `%.*f` rounds the exact binary value half-to-even, which is Python's rule.
+private func round(_ v: Double, _ places: Int) -> Double {
+    Double(String(format: "%.\(places)f", v)) ?? v
+}
+
+#if DEBUG
+/// Cheap invariants over a synthetic page. Empty result means everything held.
+enum InkLayoutSelfCheck {
+    /// Three rows of four two-stroke words, 20 pt tall, 40 pt apart, with a deterministic
+    /// baseline wobble of +/- 2*jitter.
+    private static func page(_ jitter: Double) -> [InkBox] {
+        var out: [InkBox] = []
+        for row in 0..<3 {
+            let base = 100.0 + Double(row) * 40
+            for w in 0..<4 {
+                let x = 50.0 + Double(w) * 60
+                let j = jitter * Double((row * 4 + w) % 5 - 2)
+                out.append(InkBox(x0: x, y0: base - 20 + j, x1: x + 18, y1: base + j))
+                out.append(InkBox(x0: x + 22, y0: base - 20 + j, x1: x + 40, y1: base + j))
+            }
+        }
+        return out
+    }
+
+    static func run() -> [String] {
+        var fail: [String] = []
+        let boxes = page(2)
+        let a = InkLayout.analyze(boxes)
+        if a.lines.count != 3 { fail.append("rows: expected 3 lines, got \(a.lines.count)") }
+        if a.lines.first?.words.count != 4 {
+            fail.append("words: expected 4, got \(a.lines.first?.words.count ?? -1)")
+        }
+
+        let strong = InkLayout.plan(a, strength: .strong)
+        let before = InkLayout.metrics(boxes, analysis: a)
+        let after = InkLayout.metrics(InkLayout.moved(boxes, strong))
+        if after.baselineSpread >= before.baselineSpread {
+            fail.append("baseline: \(before.baselineSpread) -> \(after.baselineSpread)")
+        }
+
+        let travel = { (o: [Offset]) in o.reduce(0.0) { $0 + abs($1.dx) + abs($1.dy) } }
+        let light = InkLayout.plan(a, strength: .light)
+        if travel(light) >= travel(strong) {
+            fail.append("strength: light \(travel(light)) not < strong \(travel(strong))")
+        }
+
+        let frozen = InkLayout.plan(a, strength: .strong, roles: [.paragraph, .equation, .paragraph])
+        if a.lines.count > 1, a.lines[1].indices.contains(where: { !frozen[$0].isZero }) {
+            fail.append("frozen: equation line moved")
+        }
+
+        if !InkLayout.plan(InkLayout.analyze([]), strength: .strong).isEmpty {
+            fail.append("empty: expected no offsets")
+        }
+        return fail
+    }
+}
+#endif
