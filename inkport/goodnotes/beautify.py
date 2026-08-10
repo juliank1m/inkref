@@ -62,16 +62,18 @@ class Report:
         out = [f"strength={self.strength}  strokes={self.strokes}  moved={self.moved}"]
         for p in self.pages:
             imp = p.improvement
-            if p.semantic:
-                labels = ", ".join(f"{n}x{r}" for r, n in sorted(
-                    {r: p.semantic.roles.count(r) for r in set(p.semantic.roles)}.items()))
-                out.append(f"  semantics via {p.semantic.source}: {labels}")
-                for w in p.semantic.warnings:
-                    out.append(f"    ! {w}")
             out.append(
                 f"  page {p.page_id[:8]}  {p.strokes:4d} strokes  "
                 f"{p.lines:2d} lines  {p.words:3d} words  "
                 f"max shift {p.max_shift:5.1f}pt")
+            # after its own page header, not before it — printed first, this read as though
+            # it belonged to the page above
+            if p.semantic:
+                labels = ", ".join(f"{n}x{r}" for r, n in sorted(
+                    {r: p.semantic.roles.count(r) for r in set(p.semantic.roles)}.items()))
+                out.append(f"        semantics via {p.semantic.source}: {labels}")
+                for w in p.semantic.warnings:
+                    out.append(f"        ! {w}")
             if p.before:
                 out.append(
                     "        baseline {:.2f}->{:.2f}pt ({:+.0%})   "

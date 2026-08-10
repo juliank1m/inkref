@@ -124,6 +124,44 @@ def test_written_records_are_valid():
     print("  writer: every emitted record satisfies the GoodNotes invariants")
 
 
+def test_clear_existing_keeps_everything_that_is_not_a_live_stroke():
+    """SPEC §15 / §19 test 5: content we do not understand survives the round trip.
+
+    Regression. `clear_existing` used to keep only the structural template and drop every
+    other entry on the page — which silently deleted tombstones and any non-pen-stroke
+    item (image, text box, math group), all of which this code carries as opaque bytes.
+    The samples are pure stroke pages, so nothing ever noticed.
+    """
+    from inkport.goodnotes import protobuf as pb
+    from inkport.goodnotes import records
+
+    doc = Document.open(TEMPLATE)
+    page = next(p for p in doc.pages if p.live)
+    foreign = (pb.bytes_field(1, b"NOT-A-STROKE"),
+               pb.bytes_field(records.TEXT_BOX, b"opaque payload"))
+    page.entries.append(foreign)
+    tombstones = [r for r in page.records if r.deleted]
+    assert tombstones, "fixture should contain a tombstone"
+    doc.write(OUT)
+
+    ink = InkDocument()
+    p = ink.add_page(InkPage())
+    p.add(InkStroke(points=[(50, 50), (120, 50)], width=2.0))
+
+    GoodNotesWriter(OUT).write(ink, OUT + ".2", clear_existing=True)
+    after = Document.open(OUT + ".2")
+    page2 = next(p for p in after.pages if p.records)
+
+    survived = [e for e in page2.entries if not isinstance(e, records.StrokeRecord)]
+    assert foreign in survived, "a non-pen-stroke entry was dropped"
+    assert len([r for r in page2.records if r.deleted]) == len(tombstones), \
+        "a tombstone was dropped"
+    assert len(page2.live) == 1, f"expected only our stroke to be live, got {len(page2.live)}"
+    os.remove(OUT + ".2")
+    print("  writer: clear_existing removes live strokes only, not tombstones or "
+          "unknown objects")
+
+
 def test_template_errors_are_explicit():
     ink = InkDocument()
     for _ in range(9):
@@ -143,6 +181,7 @@ if __name__ == "__main__":
     for fn in [test_model_invariants, test_geometry_helpers, test_color,
                test_width_scale_is_calibrated,
                test_write_and_read_back, test_written_records_are_valid,
+               test_clear_existing_keeps_everything_that_is_not_a_live_stroke,
                test_template_errors_are_explicit]:
         print(fn.__name__)
         fn()

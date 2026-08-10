@@ -7,10 +7,11 @@ stay in test_goodnotes.py. The fixture has to be generated: no sample archive ho
 page (the public ones carry at most five strokes), so handwriting.messy_notes() is written
 into a copy of samples/test.goodnotes.
 
-GoodNotesWriter(clear_existing=True) keeps only its template record, which drops the
-sample's tombstone and would drop any non-pen entry with it, so both are spliced back into
-the fixture afterwards — content the engine cannot interpret surviving untouched is
-precisely what SPEC §19 test 5 is about, and there is nothing to prove without it.
+GoodNotesWriter(clear_existing=True) clears live strokes only, so the sample's own
+tombstone comes through and is used as-is. No sample holds a non-pen-stroke item, though,
+and content the engine cannot interpret surviving untouched is precisely what SPEC §19
+test 5 is about — so one synthetic text-box pair is spliced in, or there is nothing to
+prove.
 """
 import hashlib
 import os
@@ -54,9 +55,8 @@ def fixture(name="messy", mess=None):
             handwriting.messy_notes(mess=mess), path, clear_existing=True)
         doc = Document.open(path)
         page = next(p for p in doc.pages if p.live)
-        dead = next(r for p in Document.open(TEMPLATE).pages
-                    for r in p.records if r.deleted)
-        page.append(records.StrokeRecord(dead.descriptor, dead.item))
+        assert any(r.deleted for r in page.records), \
+            "the writer dropped the template's tombstone"
         page.append(FOREIGN)
         doc.write(path)
         _fixtures[name] = (path, digest(path))

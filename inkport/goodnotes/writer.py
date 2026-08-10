@@ -7,6 +7,7 @@ Current constraint (CONFIRMED): we clone an existing record for the container fi
 semantics are not established, so writing requires a template archive that already has at
 least one live stroke on each target page. Building a document with no template is untested.
 """
+from . import records
 from .document import Document, UNITS_PER_POINT
 from .strokes import Stroke, CONSTANT_WIDTH
 
@@ -58,7 +59,14 @@ class GoodNotesWriter:
                 # edit, whereas authoring a tombstone to hide it is not. Later strokes
                 # then clone the rewritten template.
                 template = page.live[0]
-                page.entries = [e for e in page.entries if e is template]
+                # Only live strokes are cleared. Tombstones and entries that are not pen
+                # strokes at all — images, text boxes, math groups, anything else this code
+                # holds as opaque bytes — stay exactly where they were. Dropping everything
+                # but the template was silent data loss on any page richer than the samples
+                # (SPEC §15, §19 test 5).
+                page.entries = [
+                    e for e in page.entries
+                    if e is template or not isinstance(e, records.StrokeRecord) or e.deleted]
                 if pending:
                     gn = self._convert(pending.pop(0))
                     template.geometry = gn.to_tpl()
