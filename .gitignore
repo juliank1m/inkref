@@ -1,3 +1,6 @@
+# never commit an API key
+.env
+
 venv/
 generated/
 out/

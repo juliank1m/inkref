@@ -33,6 +33,17 @@ private let headingLead = 1.35         // of pitch — room opened above a headi
 private let headingTrail = 1.15        // ...and below it
 private let markMaxWidth = 0.90        // a first word narrower than this may be a bullet mark
 
+// A row only counts as writing if it is much wider than it is tall. Measured on real ink:
+// lines of handwriting run 11-22x, while the strokes of a drawing group into rows of
+// 0.7-1.7x. Nothing sits in between, so the threshold is not a fine judgement.
+//
+// This is the safety net that keeps a sketch, a diagram or a doodle from being aligned to a
+// text baseline it never belonged to (SPEC §15: prefer leaving unsupported structures
+// unchanged). Pure geometry, so it holds with AI switched off — and a model may freeze
+// more, never less.
+private let textAspect = 3.0
+private let minTextLines = 2          // below this a page is not writing; leave it alone
+
 public enum InkLayout {
 
     /// A (deadband, gain) pair per transform.
@@ -106,9 +117,12 @@ public enum InkLayout {
         public var box: InkBox
         public var baseline: Double
         public var level: Int         // indent level, filled in by analyze()
+        public var isText: Bool       // false = a drawing row; never moved, never a statistic
 
-        public init(words: [Word], box: InkBox, baseline: Double, level: Int = 0) {
-            self.words = words; self.box = box; self.baseline = baseline; self.level = level
+        public init(words: [Word], box: InkBox, baseline: Double, level: Int = 0,
+                    isText: Bool = true) {
+            self.words = words; self.box = box; self.baseline = baseline
+            self.level = level; self.isText = isText
         }
 
         public var indices: [Int] { words.flatMap(\.indices) }
@@ -125,6 +139,7 @@ public enum InkLayout {
         public init() {}
 
         public var words: [Word] { lines.flatMap(\.words) }
+        public var textLines: [Line] { lines.filter(\.isText) }
     }
 
     // MARK: - structure
@@ -152,12 +167,22 @@ public enum InkLayout {
                               baseline: baselineOf(row, boxes, a.refH)))
         }
         a.lines = stableSorted(lines) { $0.baseline }
+        for k in a.lines.indices {
+            let box = a.lines[k].box
+            a.lines[k].isText = box.height > 0 && box.width >= textAspect * box.height
+        }
 
-        let diffs = zip(a.lines, a.lines.dropFirst())
+        // Every statistic below comes from writing only. One tall drawing dropped into a
+        // page of notes would otherwise drag the pitch, the margin and the word gap with
+        // it, and the text would be aligned to a shape that is not text.
+        let text = a.textLines
+
+        let diffs = zip(text, text.dropFirst())
             .map { $1.baseline - $0.baseline }.filter { $0 > 0 }
         a.pitch = diffs.isEmpty ? a.refH * 1.6 : median(diffs)
 
-        a.levels = levelsOf(a.lines.map { $0.box.x0 }, indentTol * a.refH)
+        a.levels = levelsOf(text.map { $0.box.x0 }, indentTol * a.refH)
+        if a.levels.isEmpty { a.levels = [0.0] }
         for k in a.lines.indices {
             let x = a.lines[k].box.x0
             a.lines[k].level = a.levels.indices
@@ -165,7 +190,7 @@ public enum InkLayout {
         }
 
         var gaps: [Double] = []
-        for line in a.lines {
+        for line in text {
             for k in 0..<Swift.max(0, line.words.count - 1) {
                 gaps.append(line.words[k + 1].box.x0 - line.words[k].box.x1)
             }
@@ -196,13 +221,23 @@ public enum InkLayout {
         guard !a.lines.isEmpty else { return offsets }
         let role = roleLookup(roles)
 
-        let targets = lineTargets(a.lines.map(\.baseline), a.pitch, s, role)
+        // Too little writing to reason about. A page that is mostly drawing has no baseline
+        // grid, no margin and no pitch worth inferring, and guessing one wrecks the page.
+        guard a.textLines.count >= minTextLines else { return offsets }
+
+        // Geometry can veto; a role can only add to the veto. A classifier calling a sketch
+        // a paragraph must not license moving it.
+        let frozen: (Int) -> Bool = { k in
+            role(k).isFrozen || !(a.lines.indices.contains(k) && a.lines[k].isText)
+        }
+
+        let targets = lineTargets(a.lines.map(\.baseline), a.pitch, s, role, frozen)
         let bullets = bulletOffsets(a, role)
         let cap = s.maxShift * a.refH
 
         for (k, line) in a.lines.enumerated() {
             let r = role(k)
-            if r.isFrozen { continue }              // keeps Offset(): never touched
+            if frozen(k) { continue }               // keeps Offset(): never touched
             let ldy = targets[k] - line.baseline
             let levelX = a.levels.indices.contains(line.level) ? a.levels[line.level] : line.box.x0
             let ldx = correct(levelX - line.box.x0, s.margin.deadband * a.refH, s.margin.gain)
@@ -259,8 +294,11 @@ public enum InkLayout {
         guard !a.lines.isEmpty else { return LayoutMetrics() }
         let role = roleLookup(roles)
 
+        // Only writing is scored. A drawing is never moved, so counting its rows would
+        // report a page as ragged because of ink the engine deliberately refused to touch.
+        let text = a.lines.enumerated().filter { $0.element.isText }
         var bs: [Double] = [], ps: [Double] = [], ms: [Double] = [], gs: [Double] = []
-        for line in a.lines {
+        for (_, line) in text {
             for i in line.indices where boxes.indices.contains(i) {
                 guard boxes[i].height >= tallRatio * a.refH else { continue }
                 bs.append(abs(boxes[i].y1 - line.baseline))
@@ -272,10 +310,11 @@ public enum InkLayout {
                 gs.append(abs((line.words[k + 1].box.x0 - line.words[k].box.x1) - a.wordGap))
             }
         }
-        for k in 0..<(a.lines.count - 1) {
-            let d = a.lines[k + 1].baseline - a.lines[k].baseline
+        for (top, bottom) in zip(text, text.dropFirst()) {
+            let d = bottom.element.baseline - top.element.baseline
             guard d <= paraRatio * a.pitch,
-                  role(k) != .heading, role(k + 1) != .heading else { continue }
+                  role(top.offset) != .heading,
+                  role(bottom.offset) != .heading else { continue }
             ps.append(abs(d - a.pitch))
         }
         func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
@@ -298,6 +337,7 @@ public enum InkLayout {
                 gapAbove: k == 0 ? nil
                     : round((line.baseline - a.lines[k - 1].baseline) / a.pitch, 2),
                 startsWithMark: line.words.count >= 2 && isMark(line.words[0], a.refH),
+                looksLikeText: line.isText,
                 nearby: [k - 1, k + 1].filter { $0 >= 0 && $0 < a.lines.count }.map { "L\($0)" })
         }
     }
@@ -459,12 +499,13 @@ private func roleLookup(_ roles: [Role]?) -> (Int) -> Role {
 /// gets more room above and below it than body text does, and a frozen line simply keeps
 /// the position it already had.
 private func lineTargets(_ baselines: [Double], _ pitch: Double,
-                         _ s: InkLayout.Strength, _ role: (Int) -> Role) -> [Double] {
+                         _ s: InkLayout.Strength, _ role: (Int) -> Role,
+                         _ frozen: (Int) -> Bool) -> [Double] {
     guard let first = baselines.first else { return [] }
     var out = [first]
     let (dead, gain) = s.line
     for k in 1..<baselines.count {
-        if role(k).isFrozen { out.append(baselines[k]); continue }
+        if frozen(k) { out.append(baselines[k]); continue }
         let gap = baselines[k] - baselines[k - 1]
         let lead = role(k) == .heading ? headingLead
             : (role(k - 1) == .heading ? headingTrail : 1.0)
@@ -477,10 +518,10 @@ private func lineTargets(_ baselines: [Double], _ pitch: Double,
     // onto ink that never moves. Pull them back off it first (a no-op on an all-prose page,
     // where the forward accumulation already spaces every line by at least the floor), then
     // re-run the forward pass.
-    for k in stride(from: out.count - 1, to: 0, by: -1) where !role(k - 1).isFrozen {
+    for k in stride(from: out.count - 1, to: 0, by: -1) where !frozen(k - 1) {
         out[k - 1] = Swift.min(out[k - 1], out[k] - minLineGap * pitch)
     }
-    for k in 1..<Swift.max(1, out.count) where !role(k).isFrozen {   // never overtake the line above
+    for k in 1..<Swift.max(1, out.count) where !frozen(k) {   // never overtake the line above
         out[k] = Swift.max(out[k], out[k - 1] + minLineGap * pitch)
     }
     return out

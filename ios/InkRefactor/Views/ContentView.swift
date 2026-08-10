@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var vm = RefactorViewModel()
     @State private var importing = false
     @State private var sharing = false
+    @AppStorage("BACKBOARD_API_KEY") private var apiKey = ""
 
     /// GoodNotes' UTI is imported by the app (see Info.plist), but the picker must still
     /// open a file that arrived with a generic type — an unpickable document is a dead demo.
@@ -145,6 +146,24 @@ struct ContentView: View {
                 Toggle("Send page image", isOn: $vm.useVision)
                     .fixedSize()
                     .disabled(vm.aiMode == .off)
+            }
+
+            // An iPad has no shell, so the environment variable the CLI uses cannot exist
+            // here. BackboardConfig already reads UserDefaults under the same name; this is
+            // the only way to put a key there. Stored on device, never bundled, never logged.
+            if vm.aiMode != .off && vm.aiMode != .heuristic {
+                VStack(spacing: 6) {
+                    SecureField("Backboard API key", text: $apiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .frame(maxWidth: 420)
+                    Text(apiKey.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? "No key set — falling back to on-device geometry heuristics."
+                         : "Key stored on this iPad. Model: \(BackboardConfig.fromEnvironment().model)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Text("Lines, words, baselines and margins are found on device by geometry. "
                  + "AI only labels what a region is — it never decides where any ink goes. "

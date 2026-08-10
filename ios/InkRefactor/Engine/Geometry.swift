@@ -81,13 +81,16 @@ public struct BlockDescription: Codable, Sendable {
     public var indentLevel: Int
     public var gapAbove: Double?       // gap to the line above, in pitches
     public var startsWithMark: Bool    // a lone bullet/dash before the text
+    public var looksLikeText: Bool     // false = a drawing row, which is never moved
     public var nearby: [String]
 
     public init(id: String, bbox: [Double], words: Int, strokes: Int, heightRatio: Double,
-                indentLevel: Int, gapAbove: Double?, startsWithMark: Bool, nearby: [String]) {
+                indentLevel: Int, gapAbove: Double?, startsWithMark: Bool,
+                looksLikeText: Bool = true, nearby: [String]) {
         self.id = id; self.bbox = bbox; self.words = words; self.strokes = strokes
         self.heightRatio = heightRatio; self.indentLevel = indentLevel
-        self.gapAbove = gapAbove; self.startsWithMark = startsWithMark; self.nearby = nearby
+        self.gapAbove = gapAbove; self.startsWithMark = startsWithMark
+        self.looksLikeText = looksLikeText; self.nearby = nearby
     }
 }
 

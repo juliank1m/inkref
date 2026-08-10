@@ -23,6 +23,12 @@ from statistics import median
 # --- tunables, all in multiples of ref_h unless noted ---------------------------------
 ROW_BASELINE_TOL = 0.45     # a stroke joins a row if its bottom is this close to it
 ROW_OVERLAP = 0.50          # ...or if it vertically overlaps the row this much
+# ...and in either case it must also be horizontally near the row. Without this a row is
+# defined by height alone, so two strokes on opposite edges of a multi-column page join the
+# same "line" — which is how a 4-column page of notes came out as 155 lines, one of them
+# 40 words wide, spanning every column. A word gap is well under 2x the writing height;
+# anything past this is a different block of text.
+ROW_MAX_GAP = 5.0
 WORD_GAP_MIN = 0.55         # a gap must beat this (and 1.8x the median gap) to split words
 WORD_GAP_MEDIAN_FACTOR = 1.8
 # ponytail: single-link clustering of line starts. Fine when indents are a clear step
@@ -35,6 +41,20 @@ TALL = 0.45                 # a stroke this tall relative to ref_h actually sits
 HEADING_LEAD = 1.35         # of pitch — room opened above a heading
 HEADING_TRAIL = 1.15        # ...and below it
 MARK_MAX_WIDTH = 0.90       # a first word narrower than this may be a bullet mark
+
+# A row only counts as writing if it is much wider than it is tall. Measured on real ink:
+# lines of handwriting run 11-22x, while the strokes of a drawing group into rows of
+# 0.7-1.7x. Nothing sits in between, so the threshold is not a fine judgement.
+#
+# This is the safety net that keeps a sketch, a diagram or a doodle from being aligned to a
+# text baseline it never belonged to (SPEC §15: prefer leaving unsupported structures
+# unchanged). It is pure geometry and needs no classifier, so it holds with AI switched
+# off — and a model may freeze more, never less.
+TEXT_ASPECT = 3.0
+MIN_TEXT_LINES = 2          # below this a page is not a page of writing; leave it alone
+COLUMN_QUIET = 0.08         # a gutter bin carries at most this share of the peak coverage
+COLUMN_GUTTER = 1.50        # ...and the quiet band must be this wide, x ref_h
+COLUMN_MIN_SHARE = 0.10     # both sides of a cut must hold this share of the strokes
 
 # Semantic roles. Geometry can guess some of these; a vision model can do better (see
 # inkport/ai/). Either way the role only ever selects which deterministic rule applies —
@@ -100,7 +120,10 @@ class Line:
     words: list
     box: tuple
     baseline: float
-    level: int = 0       # indent level, filled in by analyze()
+    level: int = 0            # index into Analysis.levels, for previews and describe()
+    level_x: float = 0.0      # the x this line's indent is measured against
+    block: int = 0            # which column/text block it belongs to
+    is_text: bool = True      # False = a drawing row; never moved, never a statistic
 
     @property
     def indices(self):
@@ -113,12 +136,18 @@ class Analysis:
     ref_h: float = 1.0
     pitch: float = 1.0
     levels: list = field(default_factory=list)   # x of each indent level
+    blocks: list = field(default_factory=list)   # [[line index]], columns, left to right
+    columns: list = field(default_factory=list)  # x of each column separator
     word_gap: float = 0.0                        # target gap between words
     n_boxes: int = 0
 
     @property
     def words(self):
         return [w for line in self.lines for w in line.words]
+
+    @property
+    def text_lines(self):
+        return [l for l in self.lines if l.is_text]
 
 
 def _union(boxes):
@@ -164,6 +193,7 @@ def _rows(boxes, ref_h):
         tall = list(range(len(boxes)))
     short = [i for i in range(len(boxes)) if i not in set(tall)]
 
+    max_gap = ROW_MAX_GAP * ref_h
     rows = []
     for i in sorted(tall, key=lambda i: boxes[i][3]):
         x0, y0, x1, y1 = boxes[i]
@@ -195,7 +225,23 @@ def _rows(boxes, ref_h):
             near = [(d, r) for d, r in near if d <= 1.5 * ref_h]
             best = min(near, key=lambda t: t[0])[1] if near else None
         (rows.append([i]) if best is None else best.append(i))
-    return rows
+
+    # Only now split a row where it crosses a wide horizontal gap. Doing it while building
+    # rows makes the result depend on the order strokes arrive in — a stroke at the far
+    # right is compared against a row that so far holds only its left half, and gets thrown
+    # into a row of its own. Splitting a finished row cannot go wrong that way.
+    out = []
+    for row in rows:
+        row.sort(key=lambda i: boxes[i][0])
+        piece, reach = [row[0]], boxes[row[0]][2]
+        for i in row[1:]:
+            if boxes[i][0] - reach > max_gap:
+                out.append(piece)
+                piece = []
+            piece.append(i)
+            reach = max(reach, boxes[i][2])
+        out.append(piece)
+    return out
 
 
 def _words(indices, boxes, row_h):
@@ -226,6 +272,79 @@ def _words(indices, boxes, row_h):
     return words
 
 
+def _columns(boxes, ref_h):
+    """-> x positions that separate the page's columns, left to right. Empty = one column.
+
+    Every vertical rule — line pitch, section breaks, ordering — is meaningless across two
+    columns that merely happen to sit at the same height. A four-column page sorted by
+    baseline interleaves all four, and the measured "line spacing" becomes the distance
+    between neighbouring columns instead: 0.4pt on real notes whose lines are 8pt apart.
+
+    Found by vertical projection. Chaining lines by x-overlap does not work — one wide line
+    spanning two columns links them, and transitively the whole page collapses into a
+    single block, which is exactly what it did. A gutter is instead a band that is quiet
+    down the *entire* page, which no single line can forge.
+
+    Fully empty gutters are rare (a graph or a long formula leaks across), so the test is
+    near-quiet rather than empty, and a cut is only taken when both sides hold a real share
+    of the ink.
+    """
+    if len(boxes) < 4 * COLUMN_MIN_SHARE ** -1:
+        return []
+    x0 = min(b[0] for b in boxes)
+    x1 = max(b[2] for b in boxes)
+    span = x1 - x0
+    gutter_min = max(COLUMN_GUTTER * ref_h, 1e-9)
+    if span <= 4 * gutter_min:
+        return []
+
+    bins = max(16, int(span / max(ref_h * 0.5, 1e-6)))
+    width = span / bins
+    cover = [0] * bins
+    for b in boxes:
+        lo = min(bins - 1, max(0, int((b[0] - x0) / width)))
+        hi = min(bins - 1, max(0, int((b[2] - x0) / width)))
+        for i in range(lo, hi + 1):
+            cover[i] += 1
+    peak = max(cover)
+    if not peak:
+        return []
+
+    quiet = peak * COLUMN_QUIET
+    runs, start = [], None
+    for i, c in enumerate(cover):
+        if c <= quiet and start is None:
+            start = i
+        elif c > quiet and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, bins))
+
+    cuts = []
+    for lo, hi in runs:
+        if lo == 0 or hi == bins:           # the page's own margins, not a gutter
+            continue
+        if (hi - lo) * width < gutter_min:
+            continue
+        cut = x0 + (lo + hi) / 2 * width
+        left = sum(1 for b in boxes if (b[0] + b[2]) / 2 < cut)
+        if min(left, len(boxes) - left) < COLUMN_MIN_SHARE * len(boxes):
+            continue                        # a lopsided split is a margin, not a column
+        cuts.append(cut)
+    return cuts
+
+
+def _assign_columns(lines, cuts):
+    """-> [[line index]] per column, left to right, each sorted by baseline."""
+    groups = {}
+    for i, line in enumerate(lines):
+        centre = (line.box[0] + line.box[2]) / 2
+        k = sum(1 for c in cuts if centre >= c)
+        groups.setdefault(k, []).append(i)
+    return [groups[k] for k in sorted(groups)]
+
+
 def _levels(xs, tol):
     """Single-link cluster of line-start x positions -> one x per indent level.
 
@@ -251,7 +370,21 @@ def analyze(boxes):
     if not boxes:
         return a
 
+    # Two passes. A first estimate from individual strokes is biased low, badly so on
+    # print-style or mathematical writing where most records are sub-character fragments —
+    # a dot, a bar, an exponent — and only a few span the writing height. Real notes
+    # measured a stroke median of 1.7pt against a true writing height near 6pt. Grouping
+    # once gives rows, and a row IS a line of writing, so its height is the honest number;
+    # regrouping with it fixes both the row tolerance and every threshold downstream.
     a.ref_h = _ref_height(boxes)
+    first = _rows(boxes, a.ref_h)
+    heights = [_union([boxes[i] for i in row])[3] - _union([boxes[i] for i in row])[1]
+               for row in first if len(row) > 1]
+    if heights:
+        refined = median(heights)
+        # Only ever trust it upward: rows can merge across blocks and overstate nothing,
+        # but a single-stroke row cannot understate the writing height either.
+        a.ref_h = max(a.ref_h, min(refined, 4.0 * a.ref_h))
 
     lines = []
     for row in _rows(boxes, a.ref_h):
@@ -263,18 +396,45 @@ def analyze(boxes):
                           box=_union([boxes[i] for i in row]),
                           baseline=_baseline(row, boxes, a.ref_h)))
     a.lines = sorted(lines, key=lambda l: l.baseline)
+    for line in a.lines:
+        h = line.box[3] - line.box[1]
+        line.is_text = h > 0 and (line.box[2] - line.box[0]) >= TEXT_ASPECT * h
 
-    diffs = [b.baseline - t.baseline for t, b in zip(a.lines, a.lines[1:])]
-    diffs = [d for d in diffs if d > 0]
+    # Every statistic below is taken from writing only. One tall drawing dropped into a
+    # page of notes would otherwise drag the pitch, the margin and the word gap with it,
+    # and the text would be aligned to a shape that is not text.
+    text = a.text_lines
+    a.columns = _columns(boxes, a.ref_h)
+    a.blocks = [[k for k in g if a.lines[k].is_text]
+                for g in _assign_columns(a.lines, a.columns)]
+    a.blocks = [g for g in a.blocks if g]
+    for n, group in enumerate(a.blocks):
+        group.sort(key=lambda k: a.lines[k].baseline)
+        for k in group:
+            a.lines[k].block = n
+
+    # Pitch and indent levels are per block: a column has its own line rhythm and its own
+    # left edge, and mixing two columns' worth of either produces a number that describes
+    # neither.
+    diffs = []
+    levels = []
+    for group in a.blocks:
+        rows = [a.lines[k] for k in group]
+        diffs += [b.baseline - t.baseline for t, b in zip(rows, rows[1:])
+                  if b.baseline - t.baseline > 0]
+        local = _levels([l.box[0] for l in rows], INDENT_TOL * a.ref_h) or [rows[0].box[0]]
+        for line in rows:
+            line.level_x = min(local, key=lambda x: abs(x - line.box[0]))
+        levels += local
     a.pitch = median(diffs) if diffs else a.ref_h * 1.6
 
-    a.levels = _levels([l.box[0] for l in a.lines], INDENT_TOL * a.ref_h)
+    a.levels = sorted(set(levels)) or [0.0]
     for line in a.lines:
         line.level = min(range(len(a.levels)),
-                         key=lambda k: abs(a.levels[k] - line.box[0]))
+                         key=lambda k: abs(a.levels[k] - line.level_x))
 
     gaps = [line.words[k + 1].box[0] - line.words[k].box[2]
-            for line in a.lines for k in range(len(line.words) - 1)]
+            for line in text for k in range(len(line.words) - 1)]
     gaps = [g for g in gaps if g > 0]
     target = median(gaps) if gaps else 0.6 * a.ref_h
     a.word_gap = min(max(target, 0.40 * a.ref_h), 1.50 * a.ref_h)
@@ -289,7 +449,7 @@ def _correct(err, deadband, gain):
     return gain * (err - math.copysign(deadband, err))
 
 
-def _line_targets(baselines, pitch, s, role):
+def _line_targets(baselines, pitch, s, role, frozen):
     """New baseline per line. Ordering is preserved by construction.
 
     A gap wider than `para_ratio x pitch` is read as a deliberate section break and left
@@ -302,7 +462,7 @@ def _line_targets(baselines, pitch, s, role):
     out = [baselines[0]]
     dead, gain = s.line
     for k in range(1, len(baselines)):
-        if role(k) in FROZEN_ROLES:
+        if frozen(k):
             out.append(baselines[k])
             continue
         gap = baselines[k] - baselines[k - 1]
@@ -317,10 +477,10 @@ def _line_targets(baselines, pitch, s, role):
     # where the forward accumulation already spaces every line by at least the floor), then
     # re-run the forward pass.
     for k in range(len(out) - 1, 0, -1):
-        if role(k - 1) not in FROZEN_ROLES:
+        if not frozen(k - 1):
             out[k - 1] = min(out[k - 1], out[k] - MIN_LINE_GAP * pitch)
     for k in range(1, len(out)):                      # never overtake the line above
-        if role(k) not in FROZEN_ROLES:
+        if not frozen(k):
             out[k] = max(out[k], out[k - 1] + MIN_LINE_GAP * pitch)
     return out
 
@@ -336,8 +496,8 @@ def _bullet_offsets(a, roles):
     found = {}
     for line, role in zip(a.lines, roles):
         if role == BULLET and len(line.words) >= 2 and _is_mark(line.words[0], a.ref_h):
-            found.setdefault(line.level, []).append(
-                line.words[1].box[0] - a.levels[line.level])
+            found.setdefault((line.block, line.level), []).append(
+                line.words[1].box[0] - line.level_x)
     return {lvl: median(v) for lvl, v in found.items()}
 
 
@@ -362,21 +522,38 @@ def plan(a, s=BALANCED, roles=None):
     if len(roles) != len(a.lines):
         raise ValueError(f"got {len(roles)} roles for {len(a.lines)} lines")
 
-    targets = _line_targets([l.baseline for l in a.lines], a.pitch, s, lambda k: roles[k])
+    # Too little writing to reason about. A page that is mostly drawing has no baseline
+    # grid, no margin and no pitch worth inferring, and guessing one wrecks the page.
+    if len(a.text_lines) < MIN_TEXT_LINES:
+        return offsets
+
+    def frozen(k):
+        # Geometry can veto; a role can only add to the veto. A classifier calling a
+        # sketch a paragraph must not license moving it.
+        return roles[k] in FROZEN_ROLES or not a.lines[k].is_text
+
+    # Line spacing is resolved inside each column. Running it over the page-ordered list
+    # would space a line against whichever column happened to sit beside it.
+    targets = [l.baseline for l in a.lines]
+    for group in a.blocks:
+        local = _line_targets([a.lines[k].baseline for k in group], a.pitch, s,
+                              lambda i: roles[group[i]], lambda i: frozen(group[i]))
+        for i, k in enumerate(group):
+            targets[k] = local[i]
     bullets = _bullet_offsets(a, roles)
     cap = s.max_shift * a.ref_h
     base_dead, base_gain = s.baseline
     marg_dead, marg_gain = s.margin
     sp_dead, sp_gain = s.spacing
 
-    for line, target, role in zip(a.lines, targets, roles):
-        if role in FROZEN_ROLES:
+    for k, (line, target, role) in enumerate(zip(a.lines, targets, roles)):
+        if frozen(k):
             continue                                   # keeps (0.0, 0.0): never touched
         ldy = target - line.baseline
-        level_x = a.levels[line.level]
+        level_x = line.level_x
         ldx = _correct(level_x - line.box[0], marg_dead * a.ref_h, marg_gain)
-        listed = (role == BULLET and line.level in bullets and len(line.words) >= 2
-                  and _is_mark(line.words[0], a.ref_h))
+        listed = (role == BULLET and (line.block, line.level) in bullets
+                  and len(line.words) >= 2 and _is_mark(line.words[0], a.ref_h))
 
         shift = 0.0
         prev_right = None
@@ -385,7 +562,7 @@ def plan(a, s=BALANCED, roles=None):
                 if listed and wi == 1:
                     # hang the item text off a shared offset instead of a generic gap,
                     # so a list reads as a column (SPEC §17.2)
-                    want = level_x + bullets[line.level]
+                    want = level_x + bullets[(line.block, line.level)]
                     shift = _correct(want - (w.box[0] + ldx), sp_dead * a.ref_h, sp_gain)
                 else:
                     gap = w.box[0] - prev_right
@@ -409,10 +586,42 @@ def _clamp(v, cap):
     return max(-cap, min(cap, v))
 
 
+def regressed(before, after, ref_h):
+    """True if any measure got materially worse. Noise near zero does not count."""
+    for key, was in before.items():
+        now = after.get(key, 0.0)
+        if now > was * 1.05 and now - was > 0.05 * ref_h:
+            return key
+    return None
+
+
+def verified_plan(a, boxes, s=BALANCED, roles=None):
+    """-> (offsets, strength_used, regression). A plan that is measured before it is kept.
+
+    Structure detection is a guess, and on a page it reads badly — a dense multi-column
+    formula sheet, say — a confident plan makes the page worse. The metrics that judge the
+    result cost nothing to compute against the moved boxes, so the plan is scored before it
+    is handed back, and a plan that loses is replaced by a gentler one and then by no plan
+    at all.
+
+    Doing nothing is always available and always safe. For a tool that edits someone's
+    notes, never making a page worse is worth more than squeezing out the last alignment.
+    """
+    s = strength(s)
+    before = metrics(boxes, a, roles)
+    for candidate in ([s] if s is LIGHT else [s, LIGHT]):
+        offsets = plan(a, candidate, roles)
+        after = metrics(moved(boxes, offsets), roles=roles)
+        hurt = regressed(before, after, a.ref_h)
+        if hurt is None:
+            return offsets, candidate, None
+    return [(0.0, 0.0)] * a.n_boxes, None, hurt
+
+
 def beautify(boxes, s=BALANCED, roles=None):
     """-> (Analysis, offsets). The whole engine in one call."""
     a = analyze(boxes)
-    return a, plan(a, s, roles)
+    return a, verified_plan(a, boxes, s, roles)[0]
 
 
 def describe(a):
@@ -437,6 +646,7 @@ def describe(a):
                           else round((line.baseline - a.lines[k - 1].baseline) / a.pitch, 2)),
             "starts_with_mark": bool(line.words and _is_mark(line.words[0], a.ref_h)
                                      and len(line.words) >= 2),
+            "looks_like_text": line.is_text,
             "nearby": [f"L{j}" for j in (k - 1, k + 1) if 0 <= j < len(a.lines)],
         })
     return out
@@ -461,15 +671,21 @@ def metrics(boxes, a=None, roles=None):
                 "margin_spread": 0.0, "gap_spread": 0.0}
     role = (lambda k: roles[k] if roles and k < len(roles) else PARAGRAPH)
 
-    bs = [abs(boxes[i][3] - line.baseline) for line in a.lines for i in line.indices
+    # Only writing is scored. A drawing is never moved, so counting its rows would report
+    # a page as ragged because of ink the engine deliberately refused to touch.
+    text = [(k, l) for k, l in enumerate(a.lines) if l.is_text]
+    bs = [abs(boxes[i][3] - line.baseline) for _, line in text for i in line.indices
           if boxes[i][3] - boxes[i][1] >= TALL * a.ref_h]
-    ps = [abs((b.baseline - t.baseline) - a.pitch)
-          for k, (t, b) in enumerate(zip(a.lines, a.lines[1:]))
-          if b.baseline - t.baseline <= PARA_RATIO * a.pitch
-          and HEADING not in (role(k), role(k + 1))]
-    ms = [abs(line.box[0] - a.levels[line.level]) for line in a.lines]
+    ps = []
+    for group in a.blocks:
+        rows = [(k, a.lines[k]) for k in group]
+        ps += [abs((b.baseline - t.baseline) - a.pitch)
+               for (kt, t), (kb, b) in zip(rows, rows[1:])
+               if b.baseline - t.baseline <= PARA_RATIO * a.pitch
+               and HEADING not in (role(kt), role(kb))]
+    ms = [abs(line.box[0] - line.level_x) for _, line in text]
     gs = [abs((line.words[k + 1].box[0] - line.words[k].box[2]) - a.word_gap)
-          for line in a.lines for k in range(len(line.words) - 1)]
+          for _, line in text for k in range(len(line.words) - 1)]
     mean = lambda v: sum(v) / len(v) if v else 0.0     # noqa: E731
     return {"baseline_spread": mean(bs), "pitch_spread": mean(ps),
             "margin_spread": mean(ms), "gap_spread": mean(gs)}

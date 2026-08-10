@@ -34,6 +34,30 @@ DEFAULT_MODEL = "claude-sonnet-4-20250514"
 DEFAULT_TIMEOUT = 30.0
 
 
+def _dotenv(*paths):
+    """`KEY=value` lines from a .env file. The real environment always wins.
+
+    A shell `export` does not survive into a separate process, and an API key has to live
+    somewhere that is not the repo, so this reads the two places a key is conventionally
+    put. Both are gitignored; nothing here is ever written back or logged.
+    """
+    paths = paths or (os.path.join(os.getcwd(), ".env"),
+                      os.path.expanduser("~/.inkrefactor.env"))
+    out = {}
+    for path in paths:
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    out.setdefault(key.strip(), value.strip().strip("'\""))
+        except OSError:
+            continue
+    return out
+
+
 class BackboardError(RuntimeError):
     """Anything that stopped a usable answer coming back. Always recoverable: every
     caller falls back to the deterministic path."""
@@ -49,7 +73,7 @@ class Config:
 
     @classmethod
     def from_env(cls, env=None):
-        env = os.environ if env is None else env
+        env = dict(_dotenv(), **os.environ) if env is None else env
         try:
             timeout = float(env.get("BACKBOARD_TIMEOUT", DEFAULT_TIMEOUT))
         except ValueError:

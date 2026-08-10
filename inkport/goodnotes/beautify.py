@@ -32,6 +32,8 @@ class PageReport:
     after: dict = field(default_factory=dict)
     analysis: object = None                   # layout.Analysis, for previews
     semantic: object = None                   # ai.SemanticResult, when a classifier ran
+    strength_used: object = None              # may be gentler than asked, or None = declined
+    declined: object = None                   # the measure that stopped the plan being kept
     boxes: list = field(default_factory=list)     # points, before
     offsets: list = field(default_factory=list)
 
@@ -65,7 +67,11 @@ class Report:
             out.append(
                 f"  page {p.page_id[:8]}  {p.strokes:4d} strokes  "
                 f"{p.lines:2d} lines  {p.words:3d} words  "
-                f"max shift {p.max_shift:5.1f}pt")
+                f"max shift {p.max_shift:5.1f}pt"
+                + ("" if p.strength_used in (None, self.strength)
+                   else f"  [eased to {p.strength_used}]")
+                + ("" if not p.declined
+                   else f"  [declined: would worsen {p.declined}]"))
             # after its own page header, not before it — printed first, this read as though
             # it belonged to the page above
             if p.semantic:
@@ -146,7 +152,10 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
 
         analysis = layout.analyze(boxes)
         pr.semantic = classify(page, analysis, analyzer, vision)
-        offsets = layout.plan(analysis, s, pr.semantic.roles if pr.semantic else None)
+        roles = pr.semantic.roles if pr.semantic else None
+        offsets, used, hurt = layout.verified_plan(analysis, boxes, s, roles)
+        pr.strength_used = used.name if used else None
+        pr.declined = hurt
         pr.analysis = analysis
         pr.offsets = offsets
         pr.lines = len(analysis.lines)
