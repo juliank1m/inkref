@@ -1,0 +1,12 @@
+venv/
+generated/
+out/
+__pycache__/
+*.pyc
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.DS_Store
