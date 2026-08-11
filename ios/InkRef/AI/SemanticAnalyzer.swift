@@ -57,6 +57,7 @@ public struct SemanticBlock: Sendable {
 
 /// What the layout engine consumes. `roles` is one role per line, in order.
 public struct SemanticResult: Sendable {
+    public var groups: [[Int]] = []      // line indices that must move as one unit
     public var roles: [Role]
     public var blocks: [SemanticBlock]      // only what survived validation
     public var source: String               // backboard | heuristic | none

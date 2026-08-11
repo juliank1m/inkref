@@ -81,6 +81,40 @@ def analyzer_for(reply, key=KEY):
     return BackboardAnalyzer(client=client), opener
 
 
+def test_grouped_lines_move_as_one_rigid_unit():
+    """The whole point of the semantic layer: an equation is one atom.
+
+    A group must never be re-spaced internally — that is what tore exponents off their
+    bases on a real calculus page — and every stroke in it must receive the same offset.
+    """
+    from inkref.ink import layout
+    boxes = [(100.0, 100.0, 130.0, 112.0),   # L0 numerator
+             (100.0, 114.0, 130.0, 116.0),   # L1 fraction bar
+             (100.0, 118.0, 130.0, 130.0),   # L2 denominator
+             (60.0, 200.0, 400.0, 212.0),    # L3 an ordinary line of prose
+             (58.0, 240.0, 402.0, 252.0)]    # L4 another
+    a = layout.analyze(boxes)
+    # groups name LINE indices, so find the lines the three equation strokes landed in
+    eq = sorted({k for k, line in enumerate(a.lines)
+                 if {0, 1, 2} & set(line.indices)})
+    assert len(eq) >= 2, f"fixture should split the equation across rows, got {eq}"
+
+    grouped = layout.merge_groups(a, [eq])
+    unit = next(l for l in grouped.lines if {0, 1, 2} <= set(l.indices))
+    assert unit.rigid, "a merged group must be rigid"
+    assert len(unit.words) == 1, "a rigid unit must not be split into words"
+    assert len(grouped.lines) == len(a.lines) - (len(eq) - 1), "rows were not merged"
+
+    offsets = layout.plan(grouped, layout.STRONG)
+    inside = {offsets[i] for i in (0, 1, 2)}
+    assert len(inside) == 1, f"the equation was pulled apart: {inside}"
+
+    # and without the grouping the same strength is free to separate them
+    apart = layout.plan(a, layout.STRONG)
+    assert len({apart[i] for i in (0, 1, 2)}) >= 1
+    print("  grouping: three stacked rows become one rigid unit, moved by one offset")
+
+
 def test_reply_comes_from_content_not_message():
     """Regression, found against the live API.
 
@@ -250,7 +284,8 @@ def test_the_key_travels_in_a_header_not_the_url():
 
 
 if __name__ == "__main__":
-    for fn in [test_only_malformed_output_is_retried,
+    for fn in [test_grouped_lines_move_as_one_rigid_unit,
+               test_only_malformed_output_is_retried,
                test_an_oversized_page_is_not_sent_at_all,
                test_reply_comes_from_content_not_message,
                test_well_formed_reply_sets_every_role,

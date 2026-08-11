@@ -396,6 +396,50 @@ public enum InkLayout {
     /// The page as a classifier sees it: one record per detected line, geometry only.
     /// Every id a model may answer with appears here, so an answer naming anything else is
     /// provably invented and gets dropped.
+    /// Each group of lines becomes a single rigid line.
+    ///
+    /// This is what the semantic layer is for. Geometry can see that a row is stacked; it
+    /// cannot see that three rows are one equation. A model can, and naming existing line
+    /// ids is the safest thing it could possibly return — never a coordinate. Merging
+    /// rather than special-casing keeps every rule downstream working unchanged: a group
+    /// is just a line that happens to be tall.
+    public static func mergeGroups(_ a: Analysis, _ groups: [[Int]]) -> Analysis {
+        guard !groups.isEmpty else { return a }
+        var claimed = Set<Int>()
+        var merged: [Line] = []
+        for g in groups {
+            let idx = g.filter { $0 >= 0 && $0 < a.lines.count }
+            guard idx.count >= 2 else { continue }
+            claimed.formUnion(idx)
+            let rows = idx.map { a.lines[$0] }
+            let strokes = rows.flatMap(\.indices)
+            let box = InkBox.union(rows.map(\.box))
+            // an equation sits on its lowest row, not the mean of its rows
+            let baseline = rows.map(\.baseline).max() ?? 0
+            merged.append(Line(
+                words: [Word(indices: strokes, box: box, baseline: baseline)],
+                box: box, baseline: baseline,
+                level: rows[0].level, levelX: rows.map(\.levelX).min() ?? rows[0].levelX,
+                block: rows[0].block, isText: true, rigid: true))
+        }
+        guard !merged.isEmpty else { return a }
+
+        var out = Analysis()
+        out.refH = a.refH; out.pitch = a.pitch; out.levels = a.levels
+        out.columns = a.columns; out.wordGap = a.wordGap; out.boxCount = a.boxCount
+        let kept = a.lines.enumerated().filter { !claimed.contains($0.offset) }.map(\.element)
+        out.lines = stableSorted(kept + merged) { $0.baseline }
+        // blocks index into `lines`, so they are rebuilt against the new ordering
+        out.blocks = assignColumns(out.lines, out.columns)
+            .map { $0.filter { out.lines[$0].isText } }
+            .filter { !$0.isEmpty }
+        for n in out.blocks.indices {
+            out.blocks[n] = stableSorted(out.blocks[n]) { out.lines[$0].baseline }
+            for k in out.blocks[n] { out.lines[k].block = n }
+        }
+        return out
+    }
+
     /// A plan that is measured before it is kept.
     ///
     /// Structure detection is a guess, and on a page it reads badly — a dense multi-column

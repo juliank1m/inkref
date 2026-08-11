@@ -126,6 +126,7 @@ final class RefactorViewModel {
         var built: [PagePreview] = []
         for page in geometry {
             var roles = [Role](repeating: .paragraph, count: page.analysis.lines.count)
+            var groups: [[Int]] = []
             var source = analyzer == nil ? "geometry only" : "geometry"
             if let analyzer {
                 // The page image is the only thing that leaves on an explicit opt-in (the
@@ -136,8 +137,10 @@ final class RefactorViewModel {
                 let result = await analyzer.analyze(page.blocks, image: image)
                 if result.roles.count == roles.count { roles = result.roles }
                 source = result.source
+                groups = result.groups
             }
-            built.append(await Self.finish(page, strength: requested, roles: roles, source: source))
+            built.append(await Self.finish(page, strength: requested, roles: roles,
+                                           groups: groups, source: source))
         }
 
         pages = built
@@ -227,21 +230,32 @@ final class RefactorViewModel {
     }
 
     private nonisolated static func finish(_ page: PageGeometry, strength: InkLayout.Strength,
-                                           roles: [Role], source: String) async -> PagePreview {
+                                           roles: [Role], groups: [[Int]] = [],
+                                           source: String) async -> PagePreview {
         let boxes = page.strokes.map(\.box)
+        // what the model grouped becomes one rigid line, so the plan cannot reach inside
+        // an equation to re-space it
+        let analysis = groups.isEmpty ? page.analysis
+                                      : InkLayout.mergeGroups(page.analysis, groups)
+        let planRoles = groups.isEmpty ? roles : nil
         // verifiedPlan, not plan: a plan measured to make the page worse is eased and then
         // dropped, so a page can come back unchanged but never degraded.
         let (offsets, used, declined) = InkLayout.verifiedPlan(
-            page.analysis, boxes: boxes, strength: strength, roles: roles)
+            analysis, boxes: boxes, strength: strength, roles: planRoles)
         return PagePreview(
             id: page.id, strokes: page.strokes, offsets: offsets,
             paperSize: page.paperSize, background: page.background, analysis: page.analysis,
             roles: roles, strengthUsed: used?.name, declined: declined,
-            before: InkLayout.metrics(boxes, analysis: page.analysis, roles: roles),
-            // The "after" page is re-analysed rather than re-using the old structure: the
-            // numbers have to describe the page that actually comes out.
-            after: InkLayout.metrics(zip(boxes, offsets).map { $0.offset(by: $1) },
-                                  analysis: nil, roles: roles),
+            // Scored on the structure the plan was actually made against, and on the same
+            // lines before and after — the numbers must agree with the guard that accepted
+            // the plan, and re-analysing the result compares two different structures.
+            before: InkLayout.metrics(boxes, analysis: analysis, roles: planRoles),
+            after: {
+                let shifted = zip(boxes, offsets).map { $0.offset(by: $1) }
+                return InkLayout.metrics(shifted,
+                                         analysis: reproject(analysis, shifted),
+                                         roles: planRoles)
+            }(),
             source: source)
     }
 

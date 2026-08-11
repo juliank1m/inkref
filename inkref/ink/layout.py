@@ -701,6 +701,53 @@ TRANSFORM_FOR_METRIC = {
 }
 
 
+def merge_groups(a, groups):
+    """-> a new Analysis in which each group of lines is a single rigid line.
+
+    This is what the semantic layer is actually for. Geometry can see that a row is
+    stacked; it cannot see that three rows are one equation, or that a limit and the
+    expression under it are one atom. A model can, and saying so costs it nothing it could
+    get wrong dangerously — it names existing line ids, never coordinates.
+
+    Merging rather than special-casing means every rule downstream keeps working unchanged:
+    a group is just a line that happens to be tall, it moves as a unit because a line moves
+    as a unit, and nothing can reach inside it to re-space an exponent.
+    """
+    if not groups:
+        return a
+    claimed = {k for g in groups for k in g if 0 <= k < len(a.lines)}
+    merged = []
+    for g in groups:
+        idx = [k for k in g if 0 <= k < len(a.lines)]
+        if len(idx) < 2:
+            continue
+        rows = [a.lines[k] for k in idx]
+        strokes = [i for r in rows for i in r.indices]
+        box = _union([r.box for r in rows])
+        merged.append(Line(
+            words=[Word(indices=strokes, box=box,
+                        baseline=max(r.baseline for r in rows))],
+            box=box,
+            # the bottom row's baseline: an equation sits on its lowest line, not its mean
+            baseline=max(r.baseline for r in rows),
+            level=rows[0].level, level_x=min(r.level_x for r in rows),
+            block=rows[0].block, is_text=True, rigid=True))
+    kept = [l for k, l in enumerate(a.lines) if k not in claimed]
+
+    out = Analysis(ref_h=a.ref_h, pitch=a.pitch, levels=list(a.levels),
+                   columns=list(a.columns), word_gap=a.word_gap, n_boxes=a.n_boxes)
+    out.lines = sorted(kept + merged, key=lambda l: l.baseline)
+    # blocks index into `lines`, so they have to be rebuilt against the new ordering
+    out.blocks = [[k for k in group if out.lines[k].is_text]
+                  for group in _assign_columns(out.lines, out.columns)]
+    out.blocks = [g for g in out.blocks if g]
+    for n, group in enumerate(out.blocks):
+        group.sort(key=lambda k: out.lines[k].baseline)
+        for k in group:
+            out.lines[k].block = n
+    return out
+
+
 def regressed(before, after, ref_h):
     """True if any measure got materially worse. Noise near zero does not count."""
     for key, was in before.items():

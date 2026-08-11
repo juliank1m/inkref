@@ -38,8 +38,47 @@ JSON_SCHEMA_HINT = """{
      "type": "heading|paragraph|bullet_list|equation|diagram|annotation|drawing|other",
      "confidence": 0.0-1.0,
      "text": "<approximate transcription, optional, metadata only>"}
+  ],
+  "groups": [
+    {"lines": ["<id>", "<id>"], "type": "equation|diagram", "confidence": 0.0-1.0}
   ]
 }"""
+
+
+def parse_groups(payload, valid_ids, min_confidence=0.55):
+    """-> (groups as lists of ids, warnings).
+
+    A group says "these lines are one thing" — an equation spread over a numerator, a bar
+    and a denominator, or a diagram and its labels. Downstream it becomes a single rigid
+    unit, so the worst a wrong group can do is move correct ink together; it can never
+    reshape it. Ids are validated exactly like block ids, and a line may only be claimed
+    once.
+    """
+    raw = payload.get("groups")
+    if not isinstance(raw, list):
+        return [], []
+    valid, seen, out, warnings = set(valid_ids), set(), [], []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            warnings.append("dropped a non-object group")
+            continue
+        try:
+            conf = float(entry.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        ids = [str(i) for i in entry.get("lines", []) if isinstance(i, (str, int))]
+        unknown = [i for i in ids if i not in valid]
+        ids = [i for i in ids if i in valid and i not in seen]
+        if unknown:
+            warnings.append(f"group named unknown line(s) {unknown[:3]}")
+        if conf < min_confidence:
+            warnings.append(f"group at {conf:.2f} below threshold, ignored")
+            continue
+        if len(ids) < 2:
+            continue
+        seen.update(ids)
+        out.append(ids)
+    return out, warnings
 
 
 @dataclass(frozen=True)

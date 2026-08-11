@@ -33,6 +33,12 @@ Lines detected by our geometry engine (coordinates in points, y down, origin top
 Reply with JSON matching exactly this shape and nothing else:
 {schema}
 
+Also group lines that are ONE thing and must move together — an equation split across a
+numerator, a fraction bar and a denominator; a limit and the expression beneath it; a
+diagram and its labels. Grouped lines are translated as a unit and never re-spaced
+internally, which is how exponents stay attached to their bases. Group only what you are
+sure about; leave ordinary prose ungrouped.
+
 Rules:
 - one entry per line id above, using those ids verbatim
 - `type` must be one of: {types}
@@ -69,6 +75,7 @@ def _compact(blocks):
 class SemanticResult:
     """What the layout engine consumes. `roles` is one layout role per line, in order."""
     roles: list = field(default_factory=list)
+    groups: list = field(default_factory=list)      # [[line index]] that move as one unit
     blocks: list = field(default_factory=list)      # schemas.Block, only what survived
     source: str = "none"                            # backboard | heuristic | none
     warnings: list = field(default_factory=list)
@@ -158,7 +165,10 @@ class BackboardAnalyzer:
                 reply = self.client.ask(
                     prompt if attempt == 0 else prompt + "\nReturn raw JSON only.",
                     system=SYSTEM, image=image)
+                payload = schemas.extract_json(reply)
                 found, notes = schemas.parse_blocks(reply, ids)
+                raw_groups, group_notes = schemas.parse_groups(payload, ids)
+                notes = notes + group_notes
             except BackboardError as e:
                 # Do NOT retry a transport or configuration failure. A timeout has most
                 # likely already run and been billed server-side, and an unsupported model
@@ -181,7 +191,10 @@ class BackboardAnalyzer:
             for i, b in enumerate(blocks):
                 if b["id"] in by_id:
                     roles[i] = by_id[b["id"]].role
-            return SemanticResult(roles=roles, blocks=found, source=self.name,
+            order = {b["id"]: i for i, b in enumerate(blocks)}
+            groups = [[order[i] for i in g if i in order] for g in raw_groups]
+            return SemanticResult(roles=roles, groups=[g for g in groups if len(g) > 1],
+                                  blocks=found, source=self.name,
                                   warnings=warnings + notes)
 
         base.warnings.extend(warnings + ["fell back to geometry heuristics"])

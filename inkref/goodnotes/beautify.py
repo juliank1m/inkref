@@ -153,6 +153,11 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
         analysis = layout.analyze(boxes)
         pr.semantic = classify(page, analysis, analyzer, vision)
         roles = pr.semantic.roles if pr.semantic else None
+        if pr.semantic and pr.semantic.groups:
+            # what the model grouped becomes one rigid line, so the plan below cannot
+            # reach inside an equation to re-space it
+            analysis = layout.merge_groups(analysis, pr.semantic.groups)
+            roles = None
         offsets, used, hurt = layout.verified_plan(analysis, boxes, s, roles)
         pr.strength_used = used.name if used else None
         pr.declined = hurt
