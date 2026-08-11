@@ -15,6 +15,8 @@ struct PagePreview: Identifiable {
     var offsets: [Offset]
     var analysis: InkLayout.Analysis
     var roles: [Role]
+    var strengthUsed: String?           // may be gentler than asked
+    var declined: String?               // the measure that stopped the plan being kept
     var before: LayoutMetrics
     var after: LayoutMetrics
     var source: String                  // which classifier named the roles
@@ -29,6 +31,12 @@ struct PagePreview: Identifiable {
                      "\(words) words", "\(moved) moved"]
         parts.append(named.isEmpty ? "structure via \(source)"
                                    : "\(source): " + named.joined(separator: ", "))
+        // Saying nothing here would make a deliberately untouched page look like a bug.
+        if let declined {
+            parts.append("left unchanged — refactoring would have worsened \(declined)")
+        } else if let strengthUsed, strengthUsed != "balanced" {
+            parts.append("eased to \(strengthUsed)")
+        }
         return parts.joined(separator: " · ")
     }
 }
@@ -214,10 +222,13 @@ final class RefactorViewModel {
     private nonisolated static func finish(_ page: PageGeometry, strength: InkLayout.Strength,
                                            roles: [Role], source: String) async -> PagePreview {
         let boxes = page.strokes.map(\.box)
-        let offsets = InkLayout.plan(page.analysis, strength: strength, roles: roles)
+        // verifiedPlan, not plan: a plan measured to make the page worse is eased and then
+        // dropped, so a page can come back unchanged but never degraded.
+        let (offsets, used, declined) = InkLayout.verifiedPlan(
+            page.analysis, boxes: boxes, strength: strength, roles: roles)
         return PagePreview(
             id: page.id, strokes: page.strokes, offsets: offsets, analysis: page.analysis,
-            roles: roles,
+            roles: roles, strengthUsed: used?.name, declined: declined,
             before: InkLayout.metrics(boxes, analysis: page.analysis, roles: roles),
             // The "after" page is re-analysed rather than re-using the old structure: the
             // numbers have to describe the page that actually comes out.

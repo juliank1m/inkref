@@ -27,6 +27,38 @@ func digest(_ path: String) throws {
     }
 }
 
+/// A canonical dump of what the layout engine decided, for the Python side to match.
+///
+/// Reading the same bytes identically is necessary but not sufficient: the two engines also
+/// have to *decide* the same thing, or the iPad app and the CLI quietly diverge on the same
+/// document. This prints structure and plan, not just geometry.
+func layoutDigest(_ path: String, _ strengthName: String) throws {
+    guard let s = InkLayout.Strength.named(strengthName) else {
+        throw GNError.format("unknown strength \(strengthName)")
+    }
+    let doc = try GoodNotesDocument.open(URL(fileURLWithPath: path))
+    print("layout \(URL(fileURLWithPath: path).lastPathComponent) strength=\(s.name)")
+    for page in doc.pages {
+        let strokes = try page.drawableStrokes()
+        guard strokes.count >= 2 else { continue }
+        let boxes = strokes.map(\.box)
+        let a = InkLayout.analyze(boxes)
+        let (offsets, used, hurt) = InkLayout.verifiedPlan(a, boxes: boxes, strength: s)
+        let nonzero = offsets.filter { !$0.isZero }.count
+        let maxShift = offsets.map(\.magnitude).max() ?? 0
+        print(String(format: "page %@ strokes=%d refh=%.4f pitch=%.4f cols=%d blocks=%d lines=%d",
+                     page.id, boxes.count, a.refH, a.pitch,
+                     a.columns.count, a.blocks.count, a.lines.count))
+        print(String(format: "  plan used=%@ declined=%@ moved=%d maxshift=%.4f",
+                     used?.name ?? "none", hurt ?? "-", nonzero, maxShift))
+        for (k, line) in a.lines.enumerated() {
+            print(String(format: "  L%d b=%d t=%d base=%.4f x0=%.4f lx=%.4f w=%d",
+                         k, line.block, line.isText ? 1 : 0, line.baseline,
+                         line.box.x0, line.levelX, line.words.count))
+        }
+    }
+}
+
 func beautify(_ input: String, _ output: String, _ strengthName: String) async throws {
     guard let strength = InkLayout.Strength.named(strengthName) else {
         throw GNError.format("unknown strength \(strengthName)")
@@ -66,6 +98,8 @@ struct CrossCheck {
                 print("build with -DDEBUG to run the self-check")
                 exit(2)
                 #endif
+            case "--layout" where args.count == 3:
+                try layoutDigest(args[2], args[1])
             case "--beautify" where args.count == 4:
                 try await beautify(args[2], args[3], args[1])
             case .some(let path):

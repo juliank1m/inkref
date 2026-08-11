@@ -13,6 +13,7 @@ public struct PageResult: Sendable {
     public let roles: [Role]
     public let semanticSource: String?
     public let warnings: [String]
+    public let strengthUsed: String?      // nil = the plan was declined outright
     public let before: LayoutMetrics
     public let after: LayoutMetrics
 
@@ -56,10 +57,17 @@ public enum Beautifier {
                 warnings = semantic.warnings
             }
 
-            let offsets = InkLayout.plan(analysis, strength: strength, roles: roles)
+            // verifiedPlan, not plan: a plan that would make the page worse is eased and
+            // then abandoned. The app must not have a weaker guarantee than the CLI.
+            let (offsets, used, declined) = InkLayout.verifiedPlan(
+                analysis, boxes: boxes, strength: strength, roles: roles)
+            if let declined {
+                warnings.append("layout left unchanged: it would have worsened \(declined)")
+            }
             results.append(PageResult(
                 pageId: page.id, strokes: strokes, offsets: offsets, analysis: analysis,
                 roles: roles, semanticSource: source, warnings: warnings,
+                strengthUsed: used?.name,
                 before: InkLayout.metrics(boxes, analysis: analysis, roles: roles),
                 after: InkLayout.metrics(InkLayout.moved(boxes, offsets), analysis: nil, roles: roles)))
         }

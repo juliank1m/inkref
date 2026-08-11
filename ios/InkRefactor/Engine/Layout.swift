@@ -31,6 +31,10 @@ private let paraRatio = 1.70           // a line gap wider than this x pitch rea
 private let tallRatio = 0.45           // a stroke this tall relative to refH actually sits on the baseline
 private let headingLead = 1.35         // of pitch — room opened above a heading
 private let headingTrail = 1.15        // ...and below it
+private let rowMaxGap = 5.0            // a row is cut where it crosses a gap this wide, x refH
+private let columnQuiet = 0.08         // a gutter bin carries at most this share of peak coverage
+private let columnGutter = 1.50        // ...and the quiet band must be this wide, x refH
+private let columnMinShare = 0.10      // both sides of a cut must hold this share of the strokes
 private let markMaxWidth = 0.90        // a first word narrower than this may be a bullet mark
 
 // A row only counts as writing if it is much wider than it is tall. Measured on real ink:
@@ -116,13 +120,15 @@ public enum InkLayout {
         public var words: [Word]
         public var box: InkBox
         public var baseline: Double
-        public var level: Int         // indent level, filled in by analyze()
+        public var level: Int         // index into Analysis.levels, for previews/describe
+        public var levelX: Double     // the x this line's indent is measured against
+        public var block: Int         // which column this line belongs to
         public var isText: Bool       // false = a drawing row; never moved, never a statistic
 
         public init(words: [Word], box: InkBox, baseline: Double, level: Int = 0,
-                    isText: Bool = true) {
+                    levelX: Double = 0, block: Int = 0, isText: Bool = true) {
             self.words = words; self.box = box; self.baseline = baseline
-            self.level = level; self.isText = isText
+            self.level = level; self.levelX = levelX; self.block = block; self.isText = isText
         }
 
         public var indices: [Int] { words.flatMap(\.indices) }
@@ -133,6 +139,8 @@ public enum InkLayout {
         public var refH: Double = 1.0
         public var pitch: Double = 1.0
         public var levels: [Double] = []   // x of each indent level
+        public var blocks: [[Int]] = []    // line indices per column, left to right
+        public var columns: [Double] = []  // x of each column separator
         public var wordGap: Double = 0.0   // target gap between words
         public var boxCount: Int = 0
 
@@ -150,7 +158,19 @@ public enum InkLayout {
         a.boxCount = boxes.count
         guard !boxes.isEmpty else { return a }
 
+        // Two passes. A first estimate from individual strokes is biased low, badly so on
+        // print-style or mathematical writing where most records are sub-character
+        // fragments — a dot, a bar, an exponent — and only a few span the writing height.
+        // Real notes measured a stroke median of 1.7pt against a true height near 6pt. A
+        // row IS a line of writing, so its height is the honest number.
         a.refH = refHeight(boxes)
+        let heights = rowsOf(boxes, a.refH)
+            .filter { $0.count > 1 }
+            .map { InkBox.union($0.map { boxes[$0] }).height }
+        if !heights.isEmpty {
+            // Only ever trust it upward; a merged row can overstate, never understate.
+            a.refH = Swift.max(a.refH, Swift.min(median(heights), 4.0 * a.refH))
+        }
 
         var lines: [Line] = []
         for row in rowsOf(boxes, a.refH) {
@@ -176,15 +196,37 @@ public enum InkLayout {
         // page of notes would otherwise drag the pitch, the margin and the word gap with
         // it, and the text would be aligned to a shape that is not text.
         let text = a.textLines
+        a.columns = columnsOf(boxes, a.refH)
+        a.blocks = assignColumns(a.lines, a.columns)
+            .map { $0.filter { a.lines[$0].isText } }
+            .filter { !$0.isEmpty }
+        for n in a.blocks.indices {
+            a.blocks[n] = stableSorted(a.blocks[n]) { a.lines[$0].baseline }
+            for k in a.blocks[n] { a.lines[k].block = n }
+        }
 
-        let diffs = zip(text, text.dropFirst())
-            .map { $1.baseline - $0.baseline }.filter { $0 > 0 }
+        // Pitch and indent levels are per column: a column has its own line rhythm and its
+        // own left edge, and mixing two columns' worth of either describes neither.
+        var diffs: [Double] = []
+        var levels: [Double] = []
+        for group in a.blocks {
+            let rows = group.map { a.lines[$0] }
+            diffs += zip(rows, rows.dropFirst())
+                .map { $1.baseline - $0.baseline }.filter { $0 > 0 }
+            var local = levelsOf(rows.map { $0.box.x0 }, indentTol * a.refH)
+            if local.isEmpty { local = [rows[0].box.x0] }
+            for k in group {
+                let x = a.lines[k].box.x0
+                a.lines[k].levelX = local.min { abs($0 - x) < abs($1 - x) } ?? x
+            }
+            levels += local
+        }
         a.pitch = diffs.isEmpty ? a.refH * 1.6 : median(diffs)
 
-        a.levels = levelsOf(text.map { $0.box.x0 }, indentTol * a.refH)
+        a.levels = Array(Set(levels)).sorted()
         if a.levels.isEmpty { a.levels = [0.0] }
         for k in a.lines.indices {
-            let x = a.lines[k].box.x0
+            let x = a.lines[k].levelX
             a.lines[k].level = a.levels.indices
                 .min { abs(a.levels[$0] - x) < abs(a.levels[$1] - x) } ?? 0
         }
@@ -231,7 +273,14 @@ public enum InkLayout {
             role(k).isFrozen || !(a.lines.indices.contains(k) && a.lines[k].isText)
         }
 
-        let targets = lineTargets(a.lines.map(\.baseline), a.pitch, s, role, frozen)
+        // Line spacing is resolved inside each column; over the page-ordered list a line
+        // would be spaced against whichever column happened to sit beside it.
+        var targets = a.lines.map(\.baseline)
+        for group in a.blocks {
+            let local = lineTargets(group.map { a.lines[$0].baseline }, a.pitch, s,
+                                    { role(group[$0]) }, { frozen(group[$0]) })
+            for (i, k) in group.enumerated() { targets[k] = local[i] }
+        }
         let bullets = bulletOffsets(a, role)
         let cap = s.maxShift * a.refH
 
@@ -239,9 +288,9 @@ public enum InkLayout {
             let r = role(k)
             if frozen(k) { continue }               // keeps Offset(): never touched
             let ldy = targets[k] - line.baseline
-            let levelX = a.levels.indices.contains(line.level) ? a.levels[line.level] : line.box.x0
+            let levelX = line.levelX
             let ldx = correct(levelX - line.box.x0, s.margin.deadband * a.refH, s.margin.gain)
-            let hang = bullets[line.level]
+            let hang = bullets[BulletKey(block: line.block, level: line.level)]
             let listed = r == .bullet && hang != nil && line.words.count >= 2
                 && isMark(line.words[0], a.refH)
 
@@ -303,19 +352,20 @@ public enum InkLayout {
                 guard boxes[i].height >= tallRatio * a.refH else { continue }
                 bs.append(abs(boxes[i].y1 - line.baseline))
             }
-            if a.levels.indices.contains(line.level) {
-                ms.append(abs(line.box.x0 - a.levels[line.level]))
-            }
+            ms.append(abs(line.box.x0 - line.levelX))
             for k in 0..<Swift.max(0, line.words.count - 1) {
                 gs.append(abs((line.words[k + 1].box.x0 - line.words[k].box.x1) - a.wordGap))
             }
         }
-        for (top, bottom) in zip(text, text.dropFirst()) {
-            let d = bottom.element.baseline - top.element.baseline
-            guard d <= paraRatio * a.pitch,
-                  role(top.offset) != .heading,
-                  role(bottom.offset) != .heading else { continue }
-            ps.append(abs(d - a.pitch))
+        for group in a.blocks {
+            let rows = group.map { (offset: $0, element: a.lines[$0]) }
+            for (top, bottom) in zip(rows, rows.dropFirst()) {
+                let d = bottom.element.baseline - top.element.baseline
+                guard d <= paraRatio * a.pitch,
+                      role(top.offset) != .heading,
+                      role(bottom.offset) != .heading else { continue }
+                ps.append(abs(d - a.pitch))
+            }
         }
         func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
         return LayoutMetrics(baselineSpread: mean(bs), pitchSpread: mean(ps),
@@ -325,6 +375,28 @@ public enum InkLayout {
     /// The page as a classifier sees it: one record per detected line, geometry only.
     /// Every id a model may answer with appears here, so an answer naming anything else is
     /// provably invented and gets dropped.
+    /// A plan that is measured before it is kept.
+    ///
+    /// Structure detection is a guess, and on a page it reads badly — a dense multi-column
+    /// formula sheet, say — a confident plan makes the page worse. Scoring the moved boxes
+    /// costs nothing, so a plan that loses is replaced by a gentler one and then by none at
+    /// all. Doing nothing is always available and always safe; for a tool that edits
+    /// someone's notes, never making a page worse beats squeezing out the last alignment.
+    public static func verifiedPlan(_ a: Analysis, boxes: [InkBox],
+                                    strength s: Strength = .balanced,
+                                    roles: [Role]? = nil)
+        -> (offsets: [Offset], used: Strength?, regression: String?) {
+        let before = metrics(boxes, analysis: a, roles: roles)
+        var hurt: String? = nil
+        for candidate in (s.name == "light" ? [s] : [s, .light]) {
+            let offsets = plan(a, strength: candidate, roles: roles)
+            let after = metrics(moved(boxes, offsets), analysis: nil, roles: roles)
+            hurt = regressed(before, after, a.refH)
+            if hurt == nil { return (offsets, candidate, nil) }
+        }
+        return ([Offset](repeating: Offset(), count: a.boxCount), nil, hurt)
+    }
+
     public static func describe(_ a: Analysis) -> [BlockDescription] {
         a.lines.enumerated().map { k, line in
             BlockDescription(
@@ -420,7 +492,93 @@ private func rowsOf(_ boxes: [InkBox], _ refH: Double) -> [[Int]] {
         }
         if let best { rows[best].append(i) } else { rows.append([i]) }
     }
-    return rows
+
+    // Only now split a row where it crosses a wide horizontal gap. Doing it while building
+    // rows makes the result depend on the order strokes arrive in — a stroke at the far
+    // right is compared against a row holding only its left half, and is thrown into a row
+    // of its own. Splitting a finished row cannot go wrong that way.
+    let maxGap = rowMaxGap * refH
+    var out: [[Int]] = []
+    for row in rows {
+        let ordered = stableSorted(row) { boxes[$0].x0 }
+        guard let first = ordered.first else { continue }
+        var piece = [first]
+        var reach = boxes[first].x1
+        for i in ordered.dropFirst() {
+            if boxes[i].x0 - reach > maxGap {
+                out.append(piece)
+                piece = []
+            }
+            piece.append(i)
+            reach = Swift.max(reach, boxes[i].x1)
+        }
+        out.append(piece)
+    }
+    return out
+}
+
+/// -> x positions separating the page's columns, left to right. Empty means one column.
+///
+/// Every vertical rule — pitch, section breaks, ordering — is meaningless across two
+/// columns that merely sit at the same height. A four-column page sorted by baseline
+/// interleaves all four and the measured "line spacing" becomes the distance between
+/// neighbouring columns: 0.4pt on real notes whose lines are 8pt apart.
+///
+/// Found by vertical projection. Chaining lines by x-overlap does not work — one wide line
+/// spanning two columns links them, and transitively the page collapses into one block.
+/// A gutter is a band quiet down the *entire* page, which no single line can forge. Fully
+/// empty gutters are rare, so the test is near-quiet, and a cut is taken only when both
+/// sides hold a real share of the ink.
+private func columnsOf(_ boxes: [InkBox], _ refH: Double) -> [Double] {
+    guard Double(boxes.count) >= 4.0 / columnMinShare else { return [] }
+    let x0 = boxes.map(\.x0).min() ?? 0
+    let x1 = boxes.map(\.x1).max() ?? 0
+    let span = x1 - x0
+    let gutterMin = Swift.max(columnGutter * refH, 1e-9)
+    guard span > 4 * gutterMin else { return [] }
+
+    let bins = Swift.max(16, Int(span / Swift.max(refH * 0.5, 1e-6)))
+    let width = span / Double(bins)
+    var cover = [Int](repeating: 0, count: bins)
+    for b in boxes {
+        let lo = Swift.min(bins - 1, Swift.max(0, Int((b.x0 - x0) / width)))
+        let hi = Swift.min(bins - 1, Swift.max(0, Int((b.x1 - x0) / width)))
+        if lo <= hi { for i in lo...hi { cover[i] += 1 } }
+    }
+    guard let peak = cover.max(), peak > 0 else { return [] }
+
+    let quiet = Double(peak) * columnQuiet
+    var runs: [(Int, Int)] = []
+    var start: Int? = nil
+    for (i, c) in cover.enumerated() {
+        if Double(c) <= quiet, start == nil { start = i }
+        else if Double(c) > quiet, let s = start { runs.append((s, i)); start = nil }
+    }
+    if let s = start { runs.append((s, bins)) }
+
+    var cuts: [Double] = []
+    for (lo, hi) in runs {
+        if lo == 0 || hi == bins { continue }            // the page's margins, not a gutter
+        if Double(hi - lo) * width < gutterMin { continue }
+        let cut = x0 + Double(lo + hi) / 2 * width
+        let left = boxes.filter { ($0.x0 + $0.x1) / 2 < cut }.count
+        if Swift.min(left, boxes.count - left) < Int(columnMinShare * Double(boxes.count)) {
+            continue                                     // lopsided: a margin, not a column
+        }
+        cuts.append(cut)
+    }
+    return cuts
+}
+
+/// -> [[line index]] per column, left to right.
+private func assignColumns(_ lines: [InkLayout.Line], _ cuts: [Double]) -> [[Int]] {
+    var groups: [Int: [Int]] = [:]
+    for (i, line) in lines.enumerated() {
+        let centre = (line.box.x0 + line.box.x1) / 2
+        let k = cuts.filter { centre >= $0 }.count
+        groups[k, default: []].append(i)
+    }
+    return groups.keys.sorted().map { groups[$0]! }
 }
 
 /// Split one row into words at horizontal gaps.
@@ -529,14 +687,31 @@ private func lineTargets(_ baselines: [Double], _ pitch: Double,
 
 /// Per indent level, where list text starts relative to the level. Median, so one badly
 /// placed item cannot drag the whole list.
-private func bulletOffsets(_ a: InkLayout.Analysis, _ role: (Int) -> Role) -> [Int: Double] {
-    var found: [Int: [Double]] = [:]
+/// A list hangs off its own column's indent, so the offset is keyed by both.
+struct BulletKey: Hashable { let block: Int; let level: Int }
+
+private func bulletOffsets(_ a: InkLayout.Analysis,
+                           _ role: (Int) -> Role) -> [BulletKey: Double] {
+    var found: [BulletKey: [Double]] = [:]
     for (k, line) in a.lines.enumerated() where role(k) == .bullet {
-        guard line.words.count >= 2, isMark(line.words[0], a.refH),
-              a.levels.indices.contains(line.level) else { continue }
-        found[line.level, default: []].append(line.words[1].box.x0 - a.levels[line.level])
+        guard line.words.count >= 2, isMark(line.words[0], a.refH) else { continue }
+        found[BulletKey(block: line.block, level: line.level), default: []]
+            .append(line.words[1].box.x0 - line.levelX)
     }
     return found.mapValues(median)
+}
+
+/// True if any measure got materially worse. Noise near zero does not count.
+public func regressed(_ before: LayoutMetrics, _ after: LayoutMetrics,
+                      _ refH: Double) -> String? {
+    let pairs = [("baseline", before.baselineSpread, after.baselineSpread),
+                 ("pitch", before.pitchSpread, after.pitchSpread),
+                 ("margin", before.marginSpread, after.marginSpread),
+                 ("gap", before.gapSpread, after.gapSpread)]
+    for (name, was, now) in pairs where now > was * 1.05 && now - was > 0.05 * refH {
+        return name
+    }
+    return nil
 }
 
 // MARK: - small utilities

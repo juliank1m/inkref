@@ -84,6 +84,57 @@ def test_engines_agree(binary):
           f"width/segments identical")
 
 
+def python_layout_digest(path, strength="balanced"):
+    """The same canonical form ios/Tools/CrossCheck.swift --layout prints."""
+    from inkport.ink import layout
+    doc = Document.open(path)
+    s = layout.strength(strength)
+    out = [f"layout {os.path.basename(path)} strength={s.name}"]
+    for page in doc.pages:
+        drawn = bt.page_strokes(page)
+        if len(drawn) < 2:
+            continue
+        boxes = [b for _, b, _, _ in drawn]
+        a = layout.analyze(boxes)
+        offsets, used, hurt = layout.verified_plan(a, boxes, s)
+        nonzero = sum(1 for dx, dy in offsets if dx or dy)
+        max_shift = max((max(abs(dx), abs(dy)) for dx, dy in offsets), default=0.0)
+        out.append("page %s strokes=%d refh=%.4f pitch=%.4f cols=%d blocks=%d lines=%d" % (
+            page.id, len(boxes), a.ref_h, a.pitch,
+            len(a.columns), len(a.blocks), len(a.lines)))
+        out.append("  plan used=%s declined=%s moved=%d maxshift=%.4f" % (
+            used.name if used else "none", hurt or "-", nonzero, max_shift))
+        for k, line in enumerate(a.lines):
+            out.append("  L%d b=%d t=%d base=%.4f x0=%.4f lx=%.4f w=%d" % (
+                k, line.block, 1 if line.is_text else 0, line.baseline,
+                line.box[0], line.level_x, len(line.words)))
+    return "\n".join(out) + "\n"
+
+
+def test_engines_agree_on_layout(binary):
+    """Reading alike is not enough — both engines must also DECIDE alike.
+
+    Otherwise the iPad app and the CLI quietly disagree about the same document, and the
+    only symptom is that the exported file does not match the preview.
+    """
+    checked = 0
+    for path in ARCHIVES:
+        for strength in ("light", "balanced", "strong"):
+            got = subprocess.run([binary, "--layout", strength, path],
+                                 capture_output=True, text=True, check=True).stdout
+            want = python_layout_digest(path, strength)
+            if got != want:
+                for a, b in zip(want.splitlines(), got.splitlines()):
+                    if a != b:
+                        raise AssertionError(
+                            f"{os.path.basename(path)} [{strength}] layout diverges:\n"
+                            f"  python: {a}\n  swift : {b}")
+                raise AssertionError(f"{os.path.basename(path)} [{strength}]: length differs")
+            checked += 1
+    print(f"  layout agrees: {checked} document/strength combinations, structure and plan "
+          f"identical")
+
+
 def test_swift_layout_selfcheck(binary):
     proc = subprocess.run([binary, "--selfcheck"], capture_output=True, text=True)
     assert proc.returncode == 0, f"Swift layout self-check failed:\n{proc.stdout}"
@@ -145,7 +196,8 @@ if __name__ == "__main__":
             print("no swiftc on this machine — cross-check skipped")
             print("\nall checks passed")
             sys.exit(0)
-        for fn in [test_engines_agree, test_swift_layout_selfcheck,
+        for fn in [test_engines_agree, test_engines_agree_on_layout,
+                   test_swift_layout_selfcheck,
                    test_swift_beautify_output_is_readable_by_python]:
             print(fn.__name__)
             fn(binary)
