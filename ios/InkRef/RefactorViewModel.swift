@@ -60,6 +60,26 @@ struct PagePreview: Identifiable {
     var improvement: LayoutMetrics { after.improvement(over: before) }
     var moved: Int { offsets.filter { !$0.isZero }.count }
 
+    /// What changed, for a reader. Deliberately not the engineering numbers — those are
+    /// true and useful and belong in the developer panel, not in front of someone deciding
+    /// whether their notes look better.
+    var summary: String {
+        var parts: [String] = []
+        let aligned = analysis.lines.filter { line in
+            line.indices.contains { $0 < offsets.count && !offsets[$0].isZero }
+        }.count
+        if aligned > 0 { parts.append("\(aligned) lines aligned") }
+        if spacing.lines > 0 { parts.append("spacing evened out") }
+        let frozen = roles.filter(\.isFrozen).count
+        if frozen > 0 { parts.append("\(frozen) equations and diagrams left untouched") }
+        else if !unmatched.isEmpty { parts.append("drawings left untouched") }
+        if let declined {
+            return "Left as it was — cleaning up would have made the \(declined) worse."
+        }
+        return parts.isEmpty ? "Already tidy — nothing worth changing."
+                             : parts.joined(separator: " · ")
+    }
+
     var caption: String {
         let words = analysis.lines.reduce(0) { $0 + $1.words.count }
         let named = Set(roles.filter { $0 != .paragraph }.map(\.rawValue)).sorted()
@@ -127,7 +147,10 @@ final class RefactorViewModel {
     var documentName: String?
     var pageCount = 0
     var strength: InkLayout.Strength = .balanced
-    var aiMode: AIMode = .auto
+    /// The on-device heuristic by default. Backboard is a real integration and it stays
+    /// available, but a live measurement put a dense page at over two minutes with three of
+    /// five requests timing out, and nothing that slow belongs in front of anyone.
+    var aiMode: AIMode = .heuristic
     var useVision = false
     /// Read the page with Vision to find its lines and words, instead of clustering stroke
     /// boxes. On by default: it is the difference between guessing where a word ends and
@@ -137,10 +160,16 @@ final class RefactorViewModel {
     var showRecognition = false
     var showRefactored = false
     var status: Status = .idle
-    /// What the long run is doing right now. Reading a dense page takes several seconds and
-    /// a bare spinner for half a minute is indistinguishable from a hang — which, in front
-    /// of an audience, is the same thing as a hang.
+    /// What the long run is doing right now, in the user's words rather than the
+    /// pipeline's. Reading a dense page takes several seconds and a bare spinner for half a
+    /// minute is indistinguishable from a hang — which, in front of an audience, is the
+    /// same thing as a hang.
     var progress: String?
+    /// True once a plan exists. Before that the pages on screen are the document as it
+    /// arrived: a notebook you can look at and page through, not a loading screen.
+    var hasPlan = false
+    /// Developer overlays live behind this. The product is the notebook, not the console.
+    var showDeveloper = false
     var progressFraction: Double?
     var timings = Timings()
     var pages: [PagePreview] = []
@@ -166,6 +195,10 @@ final class RefactorViewModel {
             geometry = scan.pages
             documentName = url.deletingPathExtension().lastPathComponent
             pageCount = scan.count
+            // The document appears now, unformatted, rather than after the first long run.
+            // Seeing your own notebook is what makes the app feel like it opened something.
+            pages = scan.pages.map { Self.asIs($0) }
+            hasPlan = false
             status = .ready
         } catch {
             status = .failed(Self.message(error))
@@ -204,8 +237,7 @@ final class RefactorViewModel {
         var built: [PagePreview] = []
         for (n, page) in geometry.enumerated() {
             progressFraction = Double(n) / Double(geometry.count)
-            progress = geometry.count == 1 ? "Reading the page…"
-                                           : "Reading page \(n + 1) of \(geometry.count)…"
+            progress = "Reading handwriting"
             // Reading the page comes first: it decides where the lines and words are, and
             // every role, block description and metric below is about *those* lines.
             let readAt = clock.now
@@ -230,20 +262,20 @@ final class RefactorViewModel {
                 source = result.source
                 groups = result.groups
             }
-            progress = geometry.count == 1 ? "Working out the layout…"
-                                           : "Laying out page \(n + 1) of \(geometry.count)…"
+            progress = "Understanding layout"
             let formatAt = clock.now
             built.append(await Self.finish(page, analysis: analysis, read: read,
                                            strength: requested, roles: roles,
                                            groups: groups, source: source))
             timings.formatting += clock.now - formatAt
-            // Shown as each page lands, so a multi-page document is visibly progressing
-            // rather than silently accumulating.
-            pages = built
+            // Each page replaces its unformatted self as it lands, so a multi-page document
+            // is visibly progressing rather than silently accumulating.
+            pages = built + geometry.dropFirst(n + 1).map(Self.asIs)
         }
 
         progress = nil
         progressFraction = nil
+        hasPlan = true
         status = .ready
         // The picker moved while this run was in flight, so the layout on screen is not the
         // strength the control claims. Redo it rather than leave the two disagreeing.
@@ -277,7 +309,18 @@ final class RefactorViewModel {
         }
     }
 
+    /// The page exactly as it arrived: every offset zero, no analysis, nothing claimed.
+    private nonisolated static func asIs(_ page: PageGeometry) -> PagePreview {
+        PagePreview(id: page.id, strokes: page.strokes,
+                    offsets: [Offset](repeating: Offset(), count: page.strokes.count),
+                    paperSize: page.paperSize, background: page.background,
+                    analysis: InkLayout.Analysis(), roles: [], strengthUsed: nil,
+                    declined: nil, before: LayoutMetrics(), after: LayoutMetrics(),
+                    source: "none")
+    }
+
     func reset() {
+        hasPlan = false
         timings = Timings()
         progress = nil
         progressFraction = nil
@@ -500,14 +543,25 @@ final class RefactorViewModel {
         return out
     }
 
+    /// What went wrong, said to the person holding the iPad.
+    ///
+    /// The detail these carry is a parser's vocabulary — record types, field numbers, tpl
+    /// signatures — and none of it tells a reader anything they can act on. Where the
+    /// failure is survivable it is not raised at all: an unreadable page is skipped, a
+    /// classifier that times out is ignored, and unrecognised ink is simply left alone.
+    /// What reaches here could not be recovered from, so it says what to do next instead.
     private nonisolated static func message(_ error: Error) -> String {
         switch error as? GNError {
-        case let .format(detail):
-            return "That doesn't look like a GoodNotes document we can read — \(detail)"
-        case let .unsupported(detail):
-            return "This document uses something InkRef doesn't handle yet — \(detail)"
+        case .format:
+            return "That file doesn't look like a GoodNotes notebook. "
+                 + "Try sharing it to InkRef from GoodNotes."
+        case .unsupported:
+            return "This notebook uses something InkRef doesn't handle yet. "
+                 + "Nothing was changed."
+        case nil where error is RefactorError:
+            return "There isn't enough handwriting in this notebook to tidy up."
         case nil:
-            return error.localizedDescription
+            return "Something went wrong opening that notebook. Nothing was changed."
         }
     }
 }
