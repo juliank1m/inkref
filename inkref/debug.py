@@ -20,16 +20,25 @@ Each layer answers one question:
                problem on prose
     blocks     were the columns separated?                            (statistics)
     baselines  where is each line now, and where will it be sent?     (plan)
+    followers  which unread strokes will travel with a line?          (stage 8A)
+    obstacles  ...and which stay put and block movement?
+    protected  which regions may not be approached at all?            (stage 10)
+    flow       which lines are spaced together as one flow?           (stage 8B)
+
+A bad result is attributable rather than mysterious: a red box in the wrong place is the
+transform, a green box adrift from its red one is the mapping, a blue stroke that should
+have been purple is the follower rule, and a flow bracket spanning two columns is the
+block rule.
 """
 import argparse
 
 from .goodnotes import beautify as bt
 from .goodnotes import render
 from .goodnotes.document import Document, UNITS_PER_POINT
-from .ink import grouping, layout, recognize
+from .ink import collide, flow, grouping, layout, recognize
 
-LAYERS = ("strokes", "ocr-lines", "ocr-words", "groups", "unmatched", "blocks",
-          "baselines")
+LAYERS = ("strokes", "ocr-lines", "ocr-words", "groups", "unmatched", "followers",
+          "obstacles", "protected", "flow", "blocks", "baselines")
 
 
 def _rect(box, stroke, width=1.0, dash=None, fill="none", opacity=1.0):
@@ -49,16 +58,50 @@ def _hline(y, x0, x1, stroke, width=1.0, dash=None):
 
 
 def overlay(boxes, lines=(), groups=(), unmatched=(), analysis=None, offsets=None,
-            layers=LAYERS):
+            layers=LAYERS, followers=None, roles=None):
     """-> raw SVG for `render.svg(extra=...)`, in GoodNotes units."""
     u = UNITS_PER_POINT
+    followers = followers or {}
     out = []
     if "strokes" in layers:
         for b in boxes:
             out.append(_rect(b, "#94a3b8", 0.15))
-    if "unmatched" in layers and unmatched:
+    # Followers and obstacles are the same population split in two, so they are drawn in
+    # deliberately unmistakable colours: purple travels, blue does not.
+    if "obstacles" in layers and unmatched:
+        for i in unmatched:
+            if i not in followers:
+                out.append(_rect(boxes[i], "#3b82f6", 0.35, fill="#3b82f6", opacity=0.12))
+    elif "unmatched" in layers and unmatched:
         for i in unmatched:
             out.append(_rect(boxes[i], "#3b82f6", 0.35, fill="#3b82f6", opacity=0.12))
+    if "followers" in layers and followers:
+        for i, k in followers.items():
+            out.append(_rect(boxes[i], "#a855f7", 0.5, fill="#a855f7", opacity=0.25))
+            if analysis is not None and k < len(analysis.lines):
+                line = analysis.lines[k]
+                cx, cy = (boxes[i][0] + boxes[i][2]) / 2, (boxes[i][1] + boxes[i][3]) / 2
+                # to the nearest point on its line, not the line's left edge: a tether
+                # drawn across the whole page reads as a wild attachment when it is not
+                tx = min(max(cx, line.box[0]), line.box[2])
+                out.append(f'<line x1="{cx * u:.1f}" y1="{cy * u:.1f}" '
+                           f'x2="{tx * u:.1f}" y2="{line.baseline * u:.1f}" '
+                           f'stroke="#a855f7" stroke-width="{0.25 * u:.2f}" '
+                           f'stroke-opacity="0.55"/>')
+    if analysis is not None and "protected" in layers and roles:
+        for k, line in enumerate(analysis.lines):
+            if k < len(roles) and roles[k] in layout.FROZEN_ROLES:
+                out.append(_rect(line.box, "#ef4444", 0.8, fill="#ef4444", opacity=0.10))
+    if analysis is not None and "flow" in layers:
+        from .ink import flow as flow_mod
+        for run in flow_mod.blocks(analysis, roles):
+            rows = [analysis.lines[k] for k in run]
+            x0 = min(l.box[0] for l in rows) - 1.5
+            y0, y1 = min(l.box[1] for l in rows), max(l.box[3] for l in rows)
+            out.append(f'<path d="M {(x0 - 2) * u:.1f} {y0 * u:.1f} '
+                       f'L {x0 * u:.1f} {y0 * u:.1f} L {x0 * u:.1f} {y1 * u:.1f} '
+                       f'L {(x0 - 2) * u:.1f} {y1 * u:.1f}" fill="none" stroke="#0ea5e9" '
+                       f'stroke-width="{0.7 * u:.2f}"/>')
     if "ocr-words" in layers:
         for line in lines:
             for w in line.words:
@@ -104,22 +147,33 @@ def page_debug(page, reader=None, strength="balanced", layers=LAYERS, structure=
     if groups:
         a = grouping.analysis(groups, boxes)
         how = f"ocr: {grouping.summary(lines, groups, boxes)}"
+        skip = {"line"}
     else:
         a = layout.analyze(boxes)
         unmatched = []
         how = f"geometry: {len(a.lines)} lines, {len(a.words)} words"
+        skip = set()
 
-    offsets, used, hurt = layout.verified_plan(a, boxes, layout.strength(strength))
-    moved = sum(1 for dx, dy in offsets if dx or dy)
+    s = layout.strength(strength)
     w, h = bt.page_size(page, boxes)
+    offsets, used, hurt = layout.verified_plan(a, boxes, s, skip=skip)
+    offsets, gate = collide.constrain(a, boxes, offsets, page=(w, h))
+    follow = flow.followers(a, boxes, unmatched)
+    offsets, spacing = flow.space(a, boxes, offsets, unmatched=unmatched, page=(w, h), s=s)
+    moved = sum(1 for dx, dy in offsets if dx or dy)
     svg = render.svg(
         [("ink", [(d, wd, (0.10, 0.10, 0.12, 1), 1.0) for _, _, d, wd in drawn])],
         box=(0.0, 0.0, w * UNITS_PER_POINT, h * UNITS_PER_POINT),
-        extra=overlay(boxes, lines, groups, unmatched, a, offsets, layers))
+        extra=overlay(boxes, lines, groups, unmatched, a, offsets, layers,
+                      followers=follow))
     return svg, (f"{page.id[:8]}: {how} | ref_h {a.ref_h:.1f}pt pitch {a.pitch:.1f}pt "
-                 f"blocks {len(a.blocks)} | {moved}/{len(boxes)} strokes moved"
+                 f"cols {len(a.blocks)} | {moved}/{len(boxes)} strokes moved"
                  + (f", declined ({hurt})" if hurt else
-                    f", {used.name}" if used else ", no plan"))
+                    f", {used.name}" if used else ", no plan")
+                 + f" | gate {gate['reduced']}r/{gate['cancelled']}c"
+                 + f" | flow {spacing['blocks']} blocks, {spacing['lines']} lines,"
+                 + f" {spacing['followers']} followers,"
+                 + f" {spacing['moved']}whole/{spacing['reduced']}part/{spacing['dropped']}drop")
 
 
 def main(argv=None):

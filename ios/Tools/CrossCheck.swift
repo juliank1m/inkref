@@ -138,9 +138,17 @@ func recognitionDigest(_ path: String) throws {
                      line.words.count))
     }
     let planned = InkLayout.plan(a, strength: .balanced, roles: roles, skip: ["line"])
-    let (constrained, gate) = Collide.constrain(a, boxes: boxes, offsets: planned,
-                                                roles: roles, page: nil)
-    print("gate groups=\(gate.groups) reduced=\(gate.reduced) cancelled=\(gate.cancelled)")
+    let (gated, gate) = Collide.constrain(a, boxes: boxes, offsets: planned,
+                                          roles: roles, page: nil)
+    print("gate groups=\(gate.groups) reduced=\(gate.reduced) cancelled=\(gate.cancelled) "
+          + "uncrossed=\(gate.uncrossed)")
+    let follow = Flow.followers(a, boxes: boxes, unmatched: unmatched, roles: roles)
+    print("followers \(follow.count) blocks \(Flow.blocks(a, roles: roles).count)")
+    for i in follow.keys.sorted() { print("  follow \(i) -> L\(follow[i]!)") }
+    let (constrained, spacing) = Flow.space(a, boxes: boxes, offsets: gated, roles: roles,
+                                            unmatched: unmatched, page: nil)
+    print("flow blocks=\(spacing.blocks) moved=\(spacing.moved) reduced=\(spacing.reduced) "
+          + "dropped=\(spacing.dropped) lines=\(spacing.lines)")
     for (k, o) in constrained.enumerated() where !o.isZero {
         print(String(format: "  offset %d %.4f %.4f", k, o.dx, o.dy))
     }

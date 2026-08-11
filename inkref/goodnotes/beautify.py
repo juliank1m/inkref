@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass, field
 
 from ..ink import collide
+from ..ink import flow
 from ..ink import grouping
 from ..ink import layout
 from ..ink import recognize
@@ -46,6 +47,7 @@ class PageReport:
     groups: list = field(default_factory=list)       # WordGroup
     unmatched: list = field(default_factory=list)    # stroke indices no group claimed
     constrained: dict = field(default_factory=dict)  # moves the collision gate reduced
+    spacing: dict = field(default_factory=dict)      # what Stage 8 line spacing did
 
     @property
     def improvement(self):
@@ -303,6 +305,9 @@ def plan_skip(pr):
     threshold — that is the next stage of this pipeline, not a tuning pass. Until then a
     page keeps the line rhythm its writer gave it, which was never the worst thing about it.
     """
+    # Line spacing no longer needs pinning: ink.flow plans it per block against the
+    # all-native-ink map, and the planner's own version — which knows nothing about unread
+    # ink — is superseded rather than merely disabled.
     return {"line"} if pr.structure == "ocr" else set()
 
 
@@ -344,8 +349,20 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
                                                    skip=plan_skip(pr))
         # Last gate before anything moves: the planner reasons about the ink it grouped,
         # the page also holds ink nobody grouped, and only this sees both.
+        paper = page_size(page, boxes)
+        # Followers are decided before the gate, not after, so a word and the punctuation
+        # that belongs to it are one group from the first move onward.
+        follow = flow.followers(analysis, boxes, pr.unmatched, roles)
+        word_groups = flow.word_groups(analysis, follow, boxes)
+        offsets = flow.adopt(word_groups, offsets, follow)
         offsets, pr.constrained = collide.constrain(
-            analysis, boxes, offsets, roles, page=page_size(page, boxes))
+            analysis, boxes, offsets, roles, page=paper, followers=follow,
+            groups=word_groups)
+        # Stage 8 on top of the within-line corrections, never instead of them: it moves
+        # each finished line as one piece, with the unread ink that follows it.
+        offsets, pr.spacing = flow.space(analysis, boxes, offsets, roles,
+                                         unmatched=pr.unmatched, page=paper, s=s,
+                                         follow=follow)
         pr.strength_used = used.name if used else None
         pr.declined = hurt
         pr.analysis = analysis

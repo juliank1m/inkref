@@ -276,7 +276,7 @@ def test_engines_agree_on_recognition_mapping(binary):
     """
     import json
 
-    from inkref.ink import collide, grouping, layout, recognize
+    from inkref.ink import collide, flow, grouping, layout, recognize
     from inkref.ink.recognize import RecognizedLine, RecognizedWord
 
     data = recognition_fixture()
@@ -321,9 +321,19 @@ def test_engines_agree_on_recognition_mapping(binary):
         # skip="line" is what beautify.plan_skip pins on any OCR-structured page; the
         # digest has to plan the same way the product does or it proves nothing.
         planned = layout.plan(a, layout.BALANCED, roles, skip={"line"})
-        constrained, gate = collide.constrain(a, boxes, planned, roles, page=None)
-        out.append("gate groups=%d reduced=%d cancelled=%d"
-                   % (gate["groups"], gate["reduced"], gate["cancelled"]))
+        gated, gate = collide.constrain(a, boxes, planned, roles, page=None)
+        out.append("gate groups=%d reduced=%d cancelled=%d uncrossed=%d"
+                   % (gate["groups"], gate["reduced"], gate["cancelled"],
+                      gate.get("uncrossed", 0)))
+        follow = flow.followers(a, boxes, unmatched, roles)
+        out.append("followers %d blocks %d" % (len(follow), len(flow.blocks(a, roles))))
+        for i in sorted(follow):
+            out.append("  follow %d -> L%d" % (i, follow[i]))
+        constrained, spacing = flow.space(a, boxes, gated, roles, unmatched=unmatched,
+                                          page=None)
+        out.append("flow blocks=%d moved=%d reduced=%d dropped=%d lines=%d"
+                   % (spacing["blocks"], spacing["moved"], spacing["reduced"],
+                      spacing["dropped"], spacing["lines"]))
         for k, (dx, dy) in enumerate(constrained):
             if dx or dy:
                 out.append("  offset %d %.4f %.4f" % (k, dx, dy))

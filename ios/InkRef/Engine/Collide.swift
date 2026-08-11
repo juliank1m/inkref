@@ -27,25 +27,145 @@ public enum Collide {
     static let steps: [Double] = [1.0, 0.6, 0.35, 0.0]
     /// Ink may come this much closer than it already was, as a share of the writing height.
     static let slackRatio = 0.02
+    /// Unowned ink this close to a moving group counts as tethered to it, and may not be
+    /// left more than `separation` further behind. Both a share of the writing height.
+    /// Deliberately looser than the follower rule in `Flow`: a stroke too ambiguous to
+    /// travel with a line is exactly the stroke that must not be abandoned by it.
+    static let tether = 1.20
+    static let separation = 0.50
+    /// Passes of the ordering repair. It only ever halves, so it converges: at zero the
+    /// layout is the original one, which is ordered by construction.
+    static let orderPasses = 4
 
     public struct Report: Sendable, Equatable {
-        public var groups = 0, reduced = 0, cancelled = 0
+        public var groups = 0, reduced = 0, cancelled = 0, uncrossed = 0
         public var touched: Int { reduced + cancelled }
+    }
+
+    /// stroke index -> owning line. Followers are owned by the line they follow, so a dot
+    /// travelling with its line is part of it even though no recognised word claimed it.
+    public static func ownership(_ a: InkLayout.Analysis,
+                                 followers: [Int: Int] = [:]) -> [Int: Int] {
+        var owner = [Int: Int]()
+        for (k, line) in a.lines.enumerated() { for i in line.indices { owner[i] = k } }
+        for (i, k) in followers where owner[i] == nil { owner[i] = k }
+        return owner
+    }
+
+    /// Strokes belonging to a region that may not be approached at all.
+    public static func protectedStrokes(_ a: InkLayout.Analysis, roles: [Role]?,
+                                        followers: [Int: Int] = [:]) -> Set<Int> {
+        let role: (Int) -> Role = { k in
+            guard let roles, k >= 0, k < roles.count else { return .paragraph }
+            return roles[k]
+        }
+        var out = Set<Int>()
+        for (k, line) in a.lines.enumerated() where role(k).isFrozen {
+            out.formUnion(line.indices)
+        }
+        for (i, k) in followers where role(k).isFrozen { out.insert(i) }
+        return out
+    }
+
+    /// Would moving `indices` (belonging to line `group`) by (dx, dy) be safe?
+    /// The predicate `constrain` uses, exposed so a planner can ask before committing.
+    public static func fits(_ a: InkLayout.Analysis, boxes: [InkBox], offsets: [Offset],
+                            indices: [Int], group: Int, dx: Double, dy: Double,
+                            roles: [Role]? = nil, page: CGSize? = nil,
+                            followers: [Int: Int] = [:], ink: InkMap? = nil) -> Bool {
+        fits(ink ?? InkMap(boxes, refH: a.refH), indices, boxes, offsets,
+             ownership(a, followers: followers),
+             protectedStrokes(a, roles: roles, followers: followers),
+             group, dx, dy, slackRatio * a.refH, page)
+    }
+
+    /// The line's own vertical shift: the median of its strokes', so one stray word does
+    /// not speak for the line.
+    static func lineDy(_ line: InkLayout.Line, _ offsets: [Offset]) -> Double {
+        let dys = line.indices.filter { $0 < offsets.count }.map { offsets[$0].dy }.sorted()
+        return dys.isEmpty ? 0 : dys[dys.count / 2]
+    }
+
+    /// Undo any reading-order inversion the gate created. Reduces only.
+    ///
+    /// Word spacing is *cumulative along a line*: each word's shift assumes the ones before
+    /// it moved too. The gate judges each word on its own, so holding one back while its
+    /// neighbour goes can slide them past each other. Measured once on a real page: one
+    /// inversion in about fifteen hundred words. Rare, and unmistakable when it happens.
+    ///
+    /// Repaired by halving the larger of the two offending offsets. Only ever reducing
+    /// keeps the gate's guarantee intact, and at zero the ink sits where the writer left it.
+    /// `groups` names what moves as one piece. Without it a repair halves one stroke of a
+    /// word and leaves the rest, which un-crosses the pair by tearing the word in two — the
+    /// precise thing every other rule here exists to prevent.
+    public static func order(_ a: InkLayout.Analysis, _ boxes: [InkBox],
+                             _ offsets: [Offset],
+                             groups: [([Int], Int)] = []) -> ([Offset], Int) {
+        var out = offsets
+        var fixed = 0
+        var members = [Int: [Int]]()
+        for (indices, _) in groups { for i in indices { members[i] = indices } }
+        func ease(_ i: Int) {
+            for j in members[i] ?? [i] where j < out.count {
+                out[j] = Offset(dx: out[j].dx / 2, dy: out[j].dy)
+            }
+        }
+        func easeDy(_ indices: [Int]) {
+            for j in indices where j < out.count {
+                out[j] = Offset(dx: out[j].dx, dy: out[j].dy / 2)
+            }
+        }
+        for _ in 0..<orderPasses {
+            var crossed = 0
+            for line in a.lines {
+                let words = line.words.filter { !$0.indices.isEmpty }
+                for (u, v) in zip(words, words.dropFirst()) {
+                    let i = u.indices[0], j = v.indices[0]
+                    guard i < out.count, j < out.count else { continue }
+                    if boxes[j].x0 + out[j].dx >= boxes[i].x0 + out[i].dx { continue }
+                    crossed += 1
+                    var k = abs(out[i].dx) >= abs(out[j].dx) ? i : j
+                    if out[k].dx == 0 { k = (k == i) ? j : i }
+                    ease(k)
+                }
+            }
+            // ...and the same hazard one level up. Baseline alignment gives each word its
+            // own dy, the gate reduces them one at a time, and two lines of a column can
+            // end up swapped.
+            for group in a.blocks {
+                let rows = group.sorted { a.lines[$0].baseline < a.lines[$1].baseline }
+                for (p, q) in zip(rows, rows.dropFirst()) {
+                    let top = a.lines[p].baseline + lineDy(a.lines[p], out)
+                    let bot = a.lines[q].baseline + lineDy(a.lines[q], out)
+                    if bot >= top { continue }
+                    crossed += 1
+                    let straying = abs(lineDy(a.lines[p], out)) >= abs(lineDy(a.lines[q], out))
+                        ? p : q
+                    let owned = groups.filter { $0.1 == straying }.flatMap(\.0)
+                    easeDy(owned.isEmpty ? a.lines[straying].indices : owned)
+                }
+            }
+            fixed += crossed
+            if crossed == 0 { break }
+        }
+        return (out, fixed)
     }
 
     /// A uniform grid over the page: "what else is near here?" without a linear scan.
     /// A page of ten thousand strokes is queried once per moving word, and a scan per query
     /// is ten million box tests — which is how a safety check ends up switched off for
     /// being slow.
-    struct InkMap {
+    public struct InkMap {
         let boxes: [InkBox]
+        let refH: Double
         let cell: Double
         private var grid: [Cell: [Int]] = [:]
 
         struct Cell: Hashable { let x: Int, y: Int }
 
-        init(_ boxes: [InkBox], refH: Double) {
+        public init(_ boxes: [InkBox], refH: Double) {
             self.boxes = boxes
+            self.refH = Swift.max(refH, 1e-6)
             self.cell = Swift.max(2 * Swift.max(refH, 1e-6), 1e-6)
             for (i, b) in boxes.enumerated() {
                 for key in Self.cells(b, cell) { grid[key, default: []].append(i) }
@@ -76,66 +196,80 @@ public enum Collide {
     /// move, so this can only make a plan gentler.
     public static func constrain(_ a: InkLayout.Analysis, boxes: [InkBox],
                                  offsets: [Offset], roles: [Role]? = nil,
-                                 page: CGSize? = nil) -> ([Offset], Report) {
+                                 page: CGSize? = nil,
+                                 groups explicit: [([Int], Int)]? = nil,
+                                 followers: [Int: Int] = [:]) -> ([Offset], Report) {
         var report = Report()
         guard !a.lines.isEmpty, offsets.contains(where: { !$0.isZero }) else {
             return (offsets, report)
         }
         let ink = InkMap(boxes, refH: a.refH)
         let slack = slackRatio * a.refH
-        let role: (Int) -> Role = { k in
-            guard let roles, k >= 0, k < roles.count else { return .paragraph }
-            return roles[k]
-        }
-
-        // Which line each stroke belongs to, and which strokes are protected. Ink inside
-        // one line may stay entangled with itself — that is what a line is.
-        var lineOf = [Int: Int]()
-        var protected = Set<Int>()
-        for (k, line) in a.lines.enumerated() {
-            let frozen = role(k).isFrozen
-            for i in line.indices {
-                lineOf[i] = k
-                if frozen { protected.insert(i) }
-            }
+        let owner = ownership(a, followers: followers)
+        let protected = protectedStrokes(a, roles: roles, followers: followers)
+        let groups = explicit ?? a.lines.enumerated().flatMap { k, line in
+            line.words.map { ($0.indices, k) }
         }
 
         var out = offsets
-        for (k, line) in a.lines.enumerated() {
-            for word in line.words {
-                let idx = word.indices.filter { $0 < out.count }
-                guard !idx.isEmpty, idx.contains(where: { !out[$0].isZero }) else { continue }
-                report.groups += 1
-                // Every stroke of a word carries the same offset in every current
-                // transform; taking the largest keeps this honest if that ever changes.
-                let dx = idx.map { out[$0].dx }.max(by: { abs($0) < abs($1) }) ?? 0
-                let dy = idx.map { out[$0].dy }.max(by: { abs($0) < abs($1) }) ?? 0
-
-                var best = 0.0
-                for scale in steps where scale != 0 {
-                    if fits(ink, idx, boxes, out, lineOf, protected, k,
-                            dx * scale, dy * scale, slack, page) {
-                        best = scale
-                        break
-                    }
-                }
-                if best < 1.0 {
-                    if best == 0 { report.cancelled += 1 } else { report.reduced += 1 }
-                    for i in idx { out[i] = Offset(dx: out[i].dx * best, dy: out[i].dy * best) }
-                }
-            }
+        for round in 0..<gateRounds {
+            var counted = Report()
+            out = gate(a, boxes, out, ink, owner, protected, groups, slack, page, &counted)
+            // Only the first pass is reported: the second re-gates what the ordering repair
+            // disturbed, and counting those again would double every number.
+            if round == 0 { report = counted }
+            let (ordered, crossed) = order(a, boxes, out, groups: groups)
+            out = ordered
+            report.uncrossed += crossed
+            if crossed == 0 { break }
         }
         return (out, report)
     }
 
+    /// Gate and ordering repair alternate this many times at most. Both only reduce, so the
+    /// sequence is monotone and terminates; two rounds settles every page measured.
+    static let gateRounds = 2
+
+    static func gate(_ a: InkLayout.Analysis, _ boxes: [InkBox], _ offsets: [Offset],
+                     _ ink: InkMap, _ owner: [Int: Int], _ protected: Set<Int>,
+                     _ groups: [([Int], Int)], _ slack: Double, _ page: CGSize?,
+                     _ report: inout Report) -> [Offset] {
+        var out = offsets
+        for (indices, k) in groups {
+            let idx = indices.filter { $0 < out.count }
+            guard !idx.isEmpty, idx.contains(where: { !out[$0].isZero }) else { continue }
+            report.groups += 1
+            // Every stroke of a group carries the same offset in every current transform;
+            // taking the largest keeps this honest if that ever changes.
+            let dx = idx.map { out[$0].dx }.max(by: { abs($0) < abs($1) }) ?? 0
+            let dy = idx.map { out[$0].dy }.max(by: { abs($0) < abs($1) }) ?? 0
+
+            var best = 0.0
+            for scale in steps where scale != 0 {
+                if fits(ink, idx, boxes, out, owner, protected, k,
+                        dx * scale, dy * scale, slack, page) {
+                    best = scale
+                    break
+                }
+            }
+            if best < 1.0 {
+                if best == 0 { report.cancelled += 1 } else { report.reduced += 1 }
+                for i in idx { out[i] = Offset(dx: out[i].dx * best, dy: out[i].dy * best) }
+            }
+        }
+        return out
+    }
+
     /// True if moving `idx` by (dx, dy) creates no new entanglement and stays on the page.
-    private static func fits(_ ink: InkMap, _ idx: [Int], _ boxes: [InkBox],
-                             _ offsets: [Offset], _ lineOf: [Int: Int],
-                             _ protected: Set<Int>, _ lineK: Int,
-                             _ dx: Double, _ dy: Double, _ slack: Double,
-                             _ page: CGSize?) -> Bool {
+    static func fits(_ ink: InkMap, _ idx: [Int], _ boxes: [InkBox],
+                     _ offsets: [Offset], _ owner: [Int: Int],
+                     _ protected: Set<Int>, _ lineK: Int,
+                     _ dx: Double, _ dy: Double, _ slack: Double,
+                     _ page: CGSize?) -> Bool {
         let own = Set(idx)
         let reach = Swift.max(abs(dx), abs(dy)) + ink.cell
+        let tetherRange = tether * ink.refH
+        let limit = separation * ink.refH
         for i in idx {
             let before = boxes[i]
             let after = before.offset(by: Offset(dx: dx, dy: dy))
@@ -145,8 +279,9 @@ public enum Collide {
             }
             for j in ink.near(after, pad: reach) {
                 if own.contains(j) || j >= offsets.count { continue }
-                // Ink inside the same line may keep touching itself.
-                if lineOf[j] == lineK, !protected.contains(j) { continue }
+                // Ink owned by the same line may keep touching itself, including the
+                // followers that travel with it.
+                if owner[j] == lineK, !protected.contains(j) { continue }
                 // Judged where the other stroke ENDS UP, not where it started, so the
                 // answer does not depend on which group is considered first.
                 let otherNow = boxes[j].offset(by: offsets[j])
@@ -157,8 +292,26 @@ public enum Collide {
                 // approached at all, not merely not overlapped further.
                 if protected.contains(j), now > 0, was == 0 { return false }
             }
+
+            // The other danger, and the one collision cannot see: moving AWAY from ink
+            // that was part of us. A comma the recogniser missed and the follower rule
+            // would not commit to is unowned and stationary; slide its line out from under
+            // it and the page tears even though nothing collided.
+            for j in ink.near(before, pad: tetherRange) {
+                if own.contains(j) || j >= offsets.count || owner[j] != nil { continue }
+                if !offsets[j].isZero { continue }   // already moving under another plan
+                let nearBefore = gap(before, boxes[j])
+                if nearBefore > tetherRange { continue }
+                if gap(after, boxes[j]) > Swift.max(nearBefore, 0) + limit { return false }
+            }
         }
         return true
+    }
+
+    static func gap(_ a: InkBox, _ b: InkBox) -> Double {
+        let dx = Swift.max(b.x0 - a.x1, a.x0 - b.x1, 0)
+        let dy = Swift.max(b.y0 - a.y1, a.y0 - b.y1, 0)
+        return (dx * dx + dy * dy).squareRoot()
     }
 
     static func overlap(_ a: InkBox, _ b: InkBox) -> Double {

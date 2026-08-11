@@ -788,7 +788,7 @@ private func levelsOf(_ xs: [Double], _ tol: Double) -> [Double] {
 
 /// Correct only the part of `err` that exceeds the deadband, so the response stays
 /// continuous — no visible jump for a stroke sitting right on the threshold.
-private func correct(_ err: Double, _ deadband: Double, _ gain: Double) -> Double {
+func correct(_ err: Double, _ deadband: Double, _ gain: Double) -> Double {
     abs(err) <= deadband ? 0 : gain * (err - (err < 0 ? -deadband : deadband))
 }
 

@@ -27,6 +27,7 @@ struct PagePreview: Identifiable {
     var groups: [WordGroup] = []
     var unmatched: [Int] = []           // strokes no group claimed; deliberately untouched
     var constrained = Collide.Report()  // moves the collision gate reduced or cancelled
+    var spacing = Flow.Report()         // what Stage 8 line spacing did
 
     var improvement: LayoutMetrics { after.improvement(over: before) }
     var moved: Int { offsets.filter { !$0.isZero }.count }
@@ -47,6 +48,11 @@ struct PagePreview: Identifiable {
         // is the difference between "nothing happened" and "nothing could safely happen".
         if constrained.touched > 0 {
             parts.append("\(constrained.touched) moves held back to clear other ink")
+        }
+        if spacing.lines > 0 {
+            parts.append("\(spacing.lines) lines re-spaced"
+                         + (spacing.followers > 0
+                            ? ", \(spacing.followers) unread strokes travelling with them" : ""))
         }
         parts.append(named.isEmpty ? "structure via \(source)"
                                    : "\(source): " + named.joined(separator: ", "))
@@ -321,9 +327,21 @@ final class RefactorViewModel {
             skip: reading.analysis == nil ? [] : ["line"])
         // Last gate before anything moves: the planner reasons about the ink it grouped,
         // the page also holds ink nobody grouped, and only this sees both.
-        let (offsets, gate) = Collide.constrain(
-            analysis, boxes: boxes, offsets: planned, roles: planRoles,
-            page: PageRender.pageSize(paper: page.paperSize, boxes: boxes))
+        let paper = PageRender.pageSize(paper: page.paperSize, boxes: boxes)
+        // Followers are decided before the gate, not after, so a word and the punctuation
+        // that belongs to it are one group from the first move onward.
+        let follow = Flow.followers(analysis, boxes: boxes,
+                                    unmatched: reading.unmatched, roles: planRoles)
+        let wordGroups = Flow.wordGroups(analysis, follow, boxes)
+        let seeded = Flow.adopt(wordGroups, planned, follow)
+        let (gated, gate) = Collide.constrain(
+            analysis, boxes: boxes, offsets: seeded, roles: planRoles, page: paper,
+            groups: wordGroups, followers: follow)
+        // Stage 8 on top of the within-line corrections, never instead of them: it moves
+        // each finished line as one piece, with the unread ink that follows it.
+        let (offsets, spacing) = Flow.space(
+            analysis, boxes: boxes, offsets: gated, roles: planRoles,
+            unmatched: reading.unmatched, page: paper, strength: strength, follow: follow)
         return PagePreview(
             id: page.id, strokes: page.strokes, offsets: offsets,
             paperSize: page.paperSize, background: page.background, analysis: read,
@@ -341,7 +359,7 @@ final class RefactorViewModel {
             source: source,
             structure: reading.analysis == nil ? "geometry" : "ocr",
             recognized: reading.lines, groups: reading.groups, unmatched: reading.unmatched,
-            constrained: gate)
+            constrained: gate, spacing: spacing)
     }
 
     private nonisolated static func write(source: URL, pages: [PagePreview],
