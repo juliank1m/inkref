@@ -143,6 +143,7 @@ public enum StrokeMapper {
         }
         a.lines = stableSorted(lines) { $0.baseline }
 
+        let fraction = fractionInk(boxes, a.refH)
         for k in a.lines.indices {
             // Recognised as text, so it is text — that judgement is the recogniser's whole
             // job, and it is a far better one than the width-to-height ratio geometry uses.
@@ -151,6 +152,7 @@ public enum StrokeMapper {
             // line and will happily let the planner re-space its numerator away from its
             // denominator, so this check earns its keep even here.
             a.lines[k].rigid = isStacked(a.lines[k], boxes, a.refH)
+                || a.lines[k].indices.contains { fraction.contains($0) }
             if a.lines[k].rigid {
                 let idx = a.lines[k].indices
                 a.lines[k].words = [InkLayout.Word(indices: idx, box: a.lines[k].box,

@@ -234,6 +234,46 @@ def test_degenerate_input():
     print("  degenerate: empty, single and all-identical box lists are handled quietly")
 
 
+def test_a_fraction_is_protected_from_prose_formatting():
+    """The demo page's own failure: word spacing re-spaced a numerator whose gaps are not
+    word gaps, and `F(x+h) - F(x)` came back as `F x - h F`.
+
+    Geometry can identify a fraction outright — a flat bar with ink above and below it,
+    aligned and close — and that is enough to protect it. Protection only: nothing here
+    rewrites, aligns or reads the expression, and it needs no recogniser.
+    """
+    ref = 15.0
+    numerator = [(96.0 + k * 14, 560.0, 96.0 + k * 14 + 11, 575.0) for k in range(8)]
+    bar = [(93.0, 588.0, 268.0, 589.5)]
+    denominator = [(96.0, 596.0, 107.0, 611.0)]
+    prose = [(64.0 + k * 14, 300.0, 64.0 + k * 14 + 11, 315.0) for k in range(10)]
+    boxes = numerator + bar + denominator + prose
+
+    caught = layout._fraction_ink(boxes, ref)
+    assert set(range(len(numerator) + len(bar) + len(denominator))) <= caught, sorted(caught)
+    assert not any(i in caught for i in range(len(boxes) - len(prose), len(boxes))), \
+        "ordinary prose must never be frozen by the fraction rule"
+
+    # ...and the whole expression keeps its internal geometry through a full plan.
+    a = layout.analyze(boxes)
+    offsets = layout.plan(a, layout.STRONG)
+    inside = sorted({(round(offsets[i][0], 6), round(offsets[i][1], 6))
+                     for i in range(len(numerator) + len(bar) + len(denominator))})
+    assert len(inside) == 1, f"the fraction was torn into {len(inside)} pieces: {inside}"
+    print("  fraction: bar with ink above and below is frozen whole, prose is not")
+
+
+def test_an_underline_is_not_a_fraction():
+    """The near miss that would freeze half a page: a heading with a rule under it has ink
+    above the bar and nothing below, which is exactly what the rule requires two of."""
+    ref = 15.0
+    heading = [(64.0 + k * 14, 100.0, 64.0 + k * 14 + 11, 115.0) for k in range(6)]
+    rule = [(62.0, 120.0, 160.0, 121.2)]
+    below = [(64.0 + k * 14, 200.0, 64.0 + k * 14 + 11, 215.0) for k in range(6)]
+    assert layout._fraction_ink(heading + rule + below, ref) == set()
+    print("  underline: a rule with nothing under it is left as an underline")
+
+
 if __name__ == "__main__":
     for fn in [test_grouping_finds_the_written_lines,
                test_a_clean_page_is_left_alone,
@@ -245,7 +285,9 @@ if __name__ == "__main__":
                test_frozen_roles_are_never_touched,
                test_zero_height_stroke_joins_its_row,
                test_describe_matches_the_lines,
-               test_degenerate_input]:
+               test_degenerate_input,
+               test_a_fraction_is_protected_from_prose_formatting,
+               test_an_underline_is_not_a_fraction]:
         print(fn.__name__)
         fn()
     print("\nall checks passed")

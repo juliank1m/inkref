@@ -64,6 +64,21 @@ MIN_TEXT_LINES = 2          # below this a page is not a page of writing; leave 
 # visibly worse page while every metric improved — because the metrics score the *detected*
 # structure, and on stacked mathematics the detected structure is wrong. Geometry cannot
 # read the maths, but it can see that a row is stacked, and refuse.
+# A fraction is the one stacked structure that geometry can identify outright, and it is
+# worth identifying because prose formatting destroys it: word spacing re-spaces a numerator
+# whose gaps are not word gaps, and "F(x+h) - F(x)" comes back as "F x - h F".
+#
+# The signature is a flat bar with ink both above and below it, all three horizontally
+# aligned and vertically close. Nothing else on a page of notes looks like that: an
+# underline has nothing below it, a minus sign is too short, a table rule has no compact
+# ink stacked on it. Deliberately narrow — a fraction missed is formatted as prose, which
+# is the status quo, while a paragraph wrongly caught is frozen for no reason a reader
+# could see.
+BAR_MIN_WIDTH = 1.20        # a bar spans at least this much writing height...
+BAR_MAX_HEIGHT = 0.18       # ...and is at most this tall, which is what makes it a bar
+BAR_REACH = 1.40            # ink this far above or below the bar belongs to it
+BAR_OVERLAP = 0.50          # ...if this much of its width sits over the bar
+
 STACKED_BAND = 1.30         # a prose line occupies from its baseline up to this x ref_h
 DESCENDER = 0.35            # how far below its baseline ordinary prose reaches (g, y, p)
 MAX_STACKED_SHARE = 0.15    # ...and a page this stacked overall is left alone entirely
@@ -427,6 +442,45 @@ def _assign_columns(lines, cuts):
     return [groups[k] for k in sorted(groups)]
 
 
+def _fraction_ink(boxes, ref_h):
+    """-> the set of stroke indices that belong to a fraction, by shape alone.
+
+    Protection, not beautification: what comes back is marked rigid so that nothing
+    re-spaces inside it. The expression is never rewritten, never aligned and never read —
+    this needs no recogniser and no model, only a bar with ink stacked on it.
+    """
+    if not boxes or ref_h <= 0:
+        return set()
+    reach = BAR_REACH * ref_h
+    bars = [i for i, b in enumerate(boxes)
+            if b[2] - b[0] >= BAR_MIN_WIDTH * ref_h and b[3] - b[1] <= BAR_MAX_HEIGHT * ref_h]
+    if not bars:
+        return set()
+
+    out = set()
+    for i in bars:
+        bx0, by0, bx1, by1 = boxes[i]
+        mid = (by0 + by1) / 2
+        above, below = [], []
+        for j, o in enumerate(boxes):
+            if j == i:
+                continue
+            width = max(o[2] - o[0], 1e-9)
+            over = min(o[2], bx1) - max(o[0], bx0)
+            if over < BAR_OVERLAP * width:
+                continue                       # not sitting over the bar
+            if 0 < mid - o[3] <= reach:
+                above.append(j)
+            elif 0 < o[1] - mid <= reach:
+                below.append(j)
+        # Both halves, or it is an underline, a strike-through or a rule.
+        if above and below:
+            out.update(above)
+            out.update(below)
+            out.add(i)
+    return out
+
+
 def _is_stacked(line, boxes, ref_h):
     """True if any ink sits outside the band a line of prose occupies.
 
@@ -483,6 +537,7 @@ def analyze(boxes):
         # but a single-stroke row cannot understate the writing height either.
         a.ref_h = max(a.ref_h, min(refined, 4.0 * a.ref_h))
 
+    fraction = _fraction_ink(boxes, a.ref_h)
     lines = []
     for row in _rows(boxes, a.ref_h):
         row_h = _ref_height([boxes[i] for i in row]) or a.ref_h
@@ -496,7 +551,11 @@ def analyze(boxes):
     for line in a.lines:
         h = line.box[3] - line.box[1]
         line.is_text = h > 0 and (line.box[2] - line.box[0]) >= TEXT_ASPECT * h
-        line.rigid = _is_stacked(line, boxes, a.ref_h)
+        # Either reason is enough, and they are separate on purpose: the stacked test is
+        # about a row carrying ink outside the prose band, this one is about a fraction
+        # whether or not its row looks unusual at all.
+        line.rigid = (_is_stacked(line, boxes, a.ref_h)
+                      or any(i in fraction for i in line.indices))
         if line.rigid:
             # One word spanning the whole row. Word spacing then has no interior gap to
             # touch and the row can only move as a unit, so an exponent keeps its base and

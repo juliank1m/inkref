@@ -147,6 +147,7 @@ def analysis(groups, boxes, n_boxes=None):
                                  baseline=layout._baseline(idx, boxes, a.ref_h)))
     a.lines = sorted(lines, key=lambda l: l.baseline)
 
+    fraction = layout._fraction_ink(boxes, a.ref_h)
     for line in a.lines:
         # Recognised as text, so it is text — that judgement is the recogniser's whole
         # job, and it is a far better one than the width-to-height ratio geometry uses.
@@ -154,7 +155,8 @@ def analysis(groups, boxes, n_boxes=None):
         # Stacked maths still has to be protected. A recogniser reads a fraction as one
         # line and will happily let the planner re-space its numerator away from its
         # denominator, so this check earns its keep even here.
-        line.rigid = layout._is_stacked(line, boxes, a.ref_h)
+        line.rigid = (layout._is_stacked(line, boxes, a.ref_h)
+                      or any(i in fraction for i in line.indices))
         if line.rigid:
             idx = line.indices
             line.words = [layout.Word(indices=idx, box=line.box,

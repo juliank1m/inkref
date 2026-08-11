@@ -42,6 +42,20 @@ private let columnMinShare = 0.10      // both sides of a cut must hold this sha
 // Ink outside the band a line of prose occupies — an exponent, a subscript, a fraction's
 // numerator and denominator. A row carrying much of it is not a row of words, and treating
 // it as one tears exponents off their bases and numerators off their denominators.
+// A fraction is the one stacked structure geometry can identify outright, and it is worth
+// identifying because prose formatting destroys it: word spacing re-spaces a numerator
+// whose gaps are not word gaps, and "F(x+h) - F(x)" comes back as "F x - h F".
+//
+// The signature is a flat bar with ink both above and below it, horizontally aligned and
+// vertically close. Nothing else on a page of notes looks like that: an underline has
+// nothing below it, a minus sign is too short, a table rule has no compact ink stacked on
+// it. Deliberately narrow — a fraction missed is formatted as prose, which is the status
+// quo, while a paragraph wrongly caught is frozen for no reason a reader could see.
+private let barMinWidth = 1.20      // a bar spans at least this much writing height...
+private let barMaxHeight = 0.18     // ...and is at most this tall, which makes it a bar
+private let barReach = 1.40         // ink this far above or below the bar belongs to it
+private let barOverlap = 0.50       // ...if this much of its width sits over the bar
+
 private let stackedBand = 1.30
 private let descender = 0.35
 private let markMaxWidth = 0.90        // a first word narrower than this may be a bullet mark
@@ -184,6 +198,7 @@ public enum InkLayout {
             a.refH = Swift.max(a.refH, Swift.min(median(heights), 4.0 * a.refH))
         }
 
+        let fraction = fractionInk(boxes, a.refH)
         var lines: [Line] = []
         for row in rowsOf(boxes, a.refH) {
             // A row of unusually small writing gets its own word-split threshold; falling
@@ -202,7 +217,11 @@ public enum InkLayout {
         for k in a.lines.indices {
             let box = a.lines[k].box
             a.lines[k].isText = box.height > 0 && box.width >= textAspect * box.height
+            // Either reason is enough, and they are separate on purpose: the stacked test
+            // is about a row carrying ink outside the prose band, this one is about a
+            // fraction whether or not its row looks unusual at all.
             a.lines[k].rigid = isStacked(a.lines[k], boxes, a.refH)
+                || a.lines[k].indices.contains { fraction.contains($0) }
             if a.lines[k].rigid {
                 // One word spanning the row: word spacing then has no interior gap to touch
                 // and the row can only move as a unit, so an exponent keeps its base.
@@ -907,6 +926,39 @@ public func reproject(_ a: InkLayout.Analysis, _ boxes: [InkBox]) -> InkLayout.A
 
 /// True if the row carries much ink outside the band a line of prose occupies. Counted by
 /// stroke rather than by area so one long fraction bar cannot outvote a row of words.
+/// -> the stroke indices that belong to a fraction, by shape alone.
+///
+/// Protection, not beautification: what comes back is marked rigid so nothing re-spaces
+/// inside it. The expression is never rewritten, never aligned and never read — this needs
+/// no recogniser and no model, only a bar with ink stacked on it.
+func fractionInk(_ boxes: [InkBox], _ refH: Double) -> Set<Int> {
+    guard !boxes.isEmpty, refH > 0 else { return [] }
+    let reach = barReach * refH
+    let bars = boxes.indices.filter {
+        boxes[$0].width >= barMinWidth * refH && boxes[$0].height <= barMaxHeight * refH
+    }
+    guard !bars.isEmpty else { return [] }
+
+    var out = Set<Int>()
+    for i in bars {
+        let bar = boxes[i]
+        let mid = (bar.y0 + bar.y1) / 2
+        var above: [Int] = [], below: [Int] = []
+        for (j, o) in boxes.enumerated() where j != i {
+            let width = Swift.max(o.width, 1e-9)
+            let over = Swift.min(o.x1, bar.x1) - Swift.max(o.x0, bar.x0)
+            if over < barOverlap * width { continue }        // not sitting over the bar
+            if mid - o.y1 > 0, mid - o.y1 <= reach { above.append(j) }
+            else if o.y0 - mid > 0, o.y0 - mid <= reach { below.append(j) }
+        }
+        // Both halves, or it is an underline, a strike-through or a rule.
+        if !above.isEmpty, !below.isEmpty {
+            out.formUnion(above); out.formUnion(below); out.insert(i)
+        }
+    }
+    return out
+}
+
 func isStacked(_ line: InkLayout.Line, _ boxes: [InkBox], _ refH: Double) -> Bool {
     let idx = line.indices
     guard !idx.isEmpty else { return false }
