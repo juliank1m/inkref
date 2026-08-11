@@ -53,6 +53,20 @@ MARK_MAX_WIDTH = 0.90       # a first word narrower than this may be a bullet ma
 # off — and a model may freeze more, never less.
 TEXT_ASPECT = 3.0
 MIN_TEXT_LINES = 2          # below this a page is not a page of writing; leave it alone
+
+# Ink that sits outside the band a line of prose occupies — an exponent, a subscript, a
+# fraction's numerator and denominator, a limit written under its operator. A row carrying
+# much of it is not a row of words, and treating it as one is actively destructive: aligning
+# "x^2/a^2 + y^2/b^2 = 1" to a single baseline tears the exponents off their bases and pulls
+# the numerators away from their denominators.
+#
+# Measured against a real multivariable-calculus page, where doing exactly that produced a
+# visibly worse page while every metric improved — because the metrics score the *detected*
+# structure, and on stacked mathematics the detected structure is wrong. Geometry cannot
+# read the maths, but it can see that a row is stacked, and refuse.
+STACKED_BAND = 1.30         # a prose line occupies from its baseline up to this x ref_h
+DESCENDER = 0.35            # how far below its baseline ordinary prose reaches (g, y, p)
+MAX_STACKED_SHARE = 0.15    # ...and a page this stacked overall is left alone entirely
 COLUMN_QUIET = 0.08         # a gutter bin carries at most this share of the peak coverage
 COLUMN_GUTTER = 1.50        # ...and the quiet band must be this wide, x ref_h
 COLUMN_MIN_SHARE = 0.10     # both sides of a cut must hold this share of the strokes
@@ -125,6 +139,7 @@ class Line:
     level_x: float = 0.0      # the x this line's indent is measured against
     block: int = 0            # which column/text block it belongs to
     is_text: bool = True      # False = a drawing row; never moved, never a statistic
+    rigid: bool = False       # stacked maths: translate whole, never re-space inside
 
     @property
     def indices(self):
@@ -377,6 +392,21 @@ def _assign_columns(lines, cuts):
     return [groups[k] for k in sorted(groups)]
 
 
+def _is_stacked(line, boxes, ref_h):
+    """True if any ink sits outside the band a line of prose occupies.
+
+    Presence, not proportion. A single exponent is enough to make a row unsafe to re-space:
+    a share-based test left `x^2/a^2 + y^2/b^2 = 1` under the threshold and tore it apart
+    anyway. Descenders are excluded, or every prose line with a `g` in it would qualify.
+    """
+    idx = line.indices
+    if not idx:
+        return False
+    above = line.baseline - STACKED_BAND * ref_h
+    below = line.baseline + DESCENDER * ref_h
+    return any(boxes[i][3] < above or boxes[i][1] > below for i in idx)
+
+
 def _levels(xs, tol):
     """Single-link cluster of line-start x positions -> one x per indent level.
 
@@ -431,6 +461,14 @@ def analyze(boxes):
     for line in a.lines:
         h = line.box[3] - line.box[1]
         line.is_text = h > 0 and (line.box[2] - line.box[0]) >= TEXT_ASPECT * h
+        line.rigid = _is_stacked(line, boxes, a.ref_h)
+        if line.rigid:
+            # One word spanning the whole row. Word spacing then has no interior gap to
+            # touch and the row can only move as a unit, so an exponent keeps its base and
+            # a numerator keeps its denominator — by construction, not by tuning.
+            idx = line.indices
+            line.words = [Word(indices=idx, box=line.box,
+                               baseline=_baseline(idx, boxes, a.ref_h))]
 
     # Every statistic below is taken from writing only. One tall drawing dropped into a
     # page of notes would otherwise drag the pitch, the margin and the word gap with it,
@@ -609,7 +647,7 @@ def plan(a, s=BALANCED, roles=None, skip=()):
             # A word too short to reach the baseline — a hyphen, a dot, an accent — has no
             # baseline of its own to trust, so it rides with its line and nothing else.
             wdy = 0.0
-            if w.box[3] - w.box[1] >= TALL * a.ref_h:
+            if not line.rigid and w.box[3] - w.box[1] >= TALL * a.ref_h:
                 wdy = _correct(line.baseline - w.baseline, base_dead * a.ref_h, base_gain)
 
             dx = _clamp(ldx + shift, cap)
@@ -643,7 +681,7 @@ def reproject(a, boxes):
                               box=_union([boxes[i] for i in line.indices]),
                               baseline=_baseline(line.indices, boxes, a.ref_h),
                               level=line.level, level_x=line.level_x,
-                              block=line.block, is_text=line.is_text))
+                              block=line.block, is_text=line.is_text, rigid=line.rigid))
     # pitch is re-derived, because how evenly the lines now sit is exactly what is scored
     diffs = []
     for group in out.blocks:

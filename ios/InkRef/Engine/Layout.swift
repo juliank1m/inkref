@@ -35,6 +35,11 @@ private let rowMaxGap = 5.0            // a row is cut where it crosses a gap th
 private let columnQuiet = 0.08         // a gutter bin carries at most this share of peak coverage
 private let columnGutter = 1.50        // ...and the quiet band must be this wide, x refH
 private let columnMinShare = 0.10      // both sides of a cut must hold this share of the strokes
+// Ink outside the band a line of prose occupies — an exponent, a subscript, a fraction's
+// numerator and denominator. A row carrying much of it is not a row of words, and treating
+// it as one tears exponents off their bases and numerators off their denominators.
+private let stackedBand = 1.30
+private let descender = 0.35
 private let markMaxWidth = 0.90        // a first word narrower than this may be a bullet mark
 
 // A row only counts as writing if it is much wider than it is tall. Measured on real ink:
@@ -124,11 +129,14 @@ public enum InkLayout {
         public var levelX: Double     // the x this line's indent is measured against
         public var block: Int         // which column this line belongs to
         public var isText: Bool       // false = a drawing row; never moved, never a statistic
+        public var rigid: Bool        // stacked maths: translate whole, never re-space inside
 
         public init(words: [Word], box: InkBox, baseline: Double, level: Int = 0,
-                    levelX: Double = 0, block: Int = 0, isText: Bool = true) {
+                    levelX: Double = 0, block: Int = 0, isText: Bool = true,
+                    rigid: Bool = false) {
             self.words = words; self.box = box; self.baseline = baseline
-            self.level = level; self.levelX = levelX; self.block = block; self.isText = isText
+            self.level = level; self.levelX = levelX; self.block = block
+            self.isText = isText; self.rigid = rigid
         }
 
         public var indices: [Int] { words.flatMap(\.indices) }
@@ -190,6 +198,14 @@ public enum InkLayout {
         for k in a.lines.indices {
             let box = a.lines[k].box
             a.lines[k].isText = box.height > 0 && box.width >= textAspect * box.height
+            a.lines[k].rigid = isStacked(a.lines[k], boxes, a.refH)
+            if a.lines[k].rigid {
+                // One word spanning the row: word spacing then has no interior gap to touch
+                // and the row can only move as a unit, so an exponent keeps its base.
+                let idx = a.lines[k].indices
+                a.lines[k].words = [InkLayout.Word(indices: idx, box: a.lines[k].box,
+                                                   baseline: baselineOf(idx, boxes, a.refH))]
+            }
         }
 
         // Every statistic below comes from writing only. One tall drawing dropped into a
@@ -788,7 +804,8 @@ public func reproject(_ a: InkLayout.Analysis, _ boxes: [InkBox]) -> InkLayout.A
             words: words,
             box: InkBox.union(line.indices.map { boxes[$0] }),
             baseline: baselineOf(line.indices, boxes, a.refH),
-            level: line.level, levelX: line.levelX, block: line.block, isText: line.isText))
+            level: line.level, levelX: line.levelX, block: line.block, isText: line.isText,
+            rigid: line.rigid))
     }
     // pitch is re-derived: how evenly the lines now sit is exactly what is scored
     var diffs: [Double] = []
@@ -799,6 +816,18 @@ public func reproject(_ a: InkLayout.Analysis, _ boxes: [InkBox]) -> InkLayout.A
     }
     out.pitch = diffs.isEmpty ? a.pitch : median(diffs)
     return out
+}
+
+/// True if the row carries much ink outside the band a line of prose occupies. Counted by
+/// stroke rather than by area so one long fraction bar cannot outvote a row of words.
+func isStacked(_ line: InkLayout.Line, _ boxes: [InkBox], _ refH: Double) -> Bool {
+    let idx = line.indices
+    guard !idx.isEmpty else { return false }
+    // Presence, not proportion: one exponent is enough to make a row unsafe to re-space.
+    // Descenders are excluded or every prose line with a `g` would qualify.
+    let above = line.baseline - stackedBand * refH
+    let below = line.baseline + descender * refH
+    return idx.contains { boxes[$0].y1 < above || boxes[$0].y0 > below }
 }
 
 /// True if any measure got materially worse. Noise near zero does not count.
