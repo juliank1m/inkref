@@ -33,10 +33,15 @@ public enum PageRender {
                       height: (boxes.map(\.y1).max() ?? 1) * 1.02)
     }
 
-    /// -> one image per tile, each paired with the transform that puts it back on the page.
-    public static func tiles(_ strokes: [StrokePath], paper: CGSize?, refH: Double,
-                             scale: Double = scale,
-                             linesPerTile: Double = linesPerTile) -> [(CGImage, PageTransform)] {
+    /// Where the tiles are, without drawing any of them.
+    ///
+    /// Split from the drawing so a caller can render one tile at a time, in parallel, and
+    /// never hold more than a few bitmaps at once. Rendering all of them up front is
+    /// simpler but keeps every tile of a page in memory simultaneously for no benefit —
+    /// each one is used once and discarded.
+    public static func plan(_ strokes: [StrokePath], paper: CGSize?, refH: Double,
+                            scale: Double = scale,
+                            linesPerTile: Double = linesPerTile) -> [PageTransform] {
         guard !strokes.isEmpty else { return [] }
         let size = pageSize(paper: paper, boxes: strokes.map(\.box))
         let span = Swift.max(linesPerTile * Swift.max(refH, 1) * 1.6, 60)   // ~1.6 refH/line
@@ -44,26 +49,38 @@ public enum PageRender {
         let ny = Swift.max(1, Int((size.height / span).rounded()))
         let tw = size.width / Double(nx), th = size.height / Double(ny)
 
-        var out: [(CGImage, PageTransform)] = []
+        var out: [PageTransform] = []
         for iy in 0..<ny {
             for ix in 0..<nx {
                 let x0 = Swift.max(0, Double(ix) * tw - tileOverlap * tw)
                 let y0 = Swift.max(0, Double(iy) * th - tileOverlap * th)
                 let x1 = Swift.min(size.width, Double(ix + 1) * tw + tileOverlap * tw)
                 let y1 = Swift.min(size.height, Double(iy + 1) * th + tileOverlap * th)
-                let t = PageTransform(width: x1 - x0, height: y1 - y0, scale: scale,
-                                      x0: x0, y0: y0)
-                // Only the strokes that can appear in this tile, so a dense page does not
-                // redraw all ten thousand of them once per tile.
-                let visible = strokes.filter { (s: StrokePath) -> Bool in
-                    let b: InkBox = s.box
-                    if b.x1 < x0 || b.x0 > x1 { return false }
-                    return !(b.y1 < y0 || b.y0 > y1)
-                }
-                if let image = draw(visible, in: t) { out.append((image, t)) }
+                out.append(PageTransform(width: x1 - x0, height: y1 - y0, scale: scale,
+                                         x0: x0, y0: y0))
             }
         }
         return out
+    }
+
+    /// One tile, drawn on demand. Only the strokes that can appear in it, so a dense page
+    /// does not redraw all ten thousand of them once per tile.
+    public static func tile(_ strokes: [StrokePath], _ t: PageTransform) -> CGImage? {
+        let visible = strokes.filter { (s: StrokePath) -> Bool in
+            let b: InkBox = s.box
+            if b.x1 < t.x0 || b.x0 > t.x0 + t.width { return false }
+            return !(b.y1 < t.y0 || b.y0 > t.y0 + t.height)
+        }
+        return draw(visible, in: t)
+    }
+
+    /// -> one image per tile, each paired with the transform that puts it back on the page.
+    /// Convenience for callers that are not doing their own concurrency (the cross-check).
+    public static func tiles(_ strokes: [StrokePath], paper: CGSize?, refH: Double,
+                             scale: Double = scale,
+                             linesPerTile: Double = linesPerTile) -> [(CGImage, PageTransform)] {
+        plan(strokes, paper: paper, refH: refH, scale: scale, linesPerTile: linesPerTile)
+            .compactMap { t in tile(strokes, t).map { ($0, t) } }
     }
 
     /// Draws exactly the transform's rectangle — no padding, no crop to the ink. That is the

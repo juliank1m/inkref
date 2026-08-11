@@ -346,17 +346,15 @@ final class RefactorViewModel {
     private nonisolated static func read(_ page: PageGeometry) async -> PageReading {
         let boxes = page.strokes.map(\.box)
         let recognizer = VisionRecognizer()
-        var lines: [RecognizedLine] = []
+        var lines: [RecognizedLine]
         // The *cheap* per-stroke estimate, deliberately, and not `analysis.refH`. The
         // tile size that was measured to work (86-90% of strokes grouped, against 37% for
         // a single image) was calibrated against this number, and it is also the only one
         // available before recognition has happened. Using the refined writing height here
         // made tiles twice as big and cost the Swift engine nineteen points of coverage
         // against Python on the same page.
-        for (image, transform) in PageRender.tiles(page.strokes, paper: page.paperSize,
-                                                   refH: refHeight(boxes)) {
-            lines += (try? recognizer.recognize(image, in: transform)) ?? []
-        }
+        let plan = PageRender.plan(page.strokes, paper: page.paperSize, refH: refHeight(boxes))
+        lines = await Self.recognize(plan, strokes: page.strokes, with: recognizer)
         guard !lines.isEmpty else { return PageReading() }
         lines = Recognition.mergeStacked(Recognition.dedupe(lines))
         let (groups, unmatched) = StrokeMapper.map(lines, boxes: boxes)
@@ -380,6 +378,46 @@ final class RefactorViewModel {
             }
             return words.joined(separator: " ")
         }
+    }
+
+    /// How many tiles are drawn and read at once.
+    ///
+    /// Recognition is 85% of a run and the tiles are independent, so this is the one place
+    /// where concurrency is nearly free. Bounded rather than unbounded on purpose: each
+    /// worker holds a bitmap and a Vision request, and a dense page has dozens of tiles —
+    /// launching them all at once would spike memory and, on a passively cooled iPad, heat.
+    /// Four is enough to saturate the small-core cluster without doing either.
+    static let recognitionWidth = 4
+
+    /// -> every tile's lines, in tile order.
+    ///
+    /// The order matters and is not cosmetic: de-duplication keeps the first of two equally
+    /// good readings, so a result that arrived in a different order would de-duplicate
+    /// differently. Results are therefore filed by index and flattened at the end, which
+    /// makes the concurrent path produce byte-identical output to the serial one.
+    private nonisolated static func recognize(_ plan: [PageTransform], strokes: [StrokePath],
+                                              with recognizer: any TextRecognizer)
+        async -> [RecognizedLine] {
+        guard !plan.isEmpty else { return [] }
+        var out = [[RecognizedLine]](repeating: [], count: plan.count)
+        await withTaskGroup(of: (Int, [RecognizedLine]).self) { group in
+            var next = 0
+            func submit() {
+                guard next < plan.count else { return }
+                let i = next
+                next += 1
+                group.addTask {
+                    guard let image = PageRender.tile(strokes, plan[i]) else { return (i, []) }
+                    return (i, (try? recognizer.recognize(image, in: plan[i])) ?? [])
+                }
+            }
+            for _ in 0..<Swift.min(recognitionWidth, plan.count) { submit() }
+            while let (i, lines) = await group.next() {
+                out[i] = lines
+                submit()      // keep exactly `recognitionWidth` in flight, never more
+            }
+        }
+        return out.flatMap { $0 }
     }
 
     private nonisolated static func finish(_ page: PageGeometry,
