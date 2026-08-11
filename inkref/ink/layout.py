@@ -67,7 +67,12 @@ MIN_TEXT_LINES = 2          # below this a page is not a page of writing; leave 
 STACKED_BAND = 1.30         # a prose line occupies from its baseline up to this x ref_h
 DESCENDER = 0.35            # how far below its baseline ordinary prose reaches (g, y, p)
 MAX_STACKED_SHARE = 0.15    # ...and a page this stacked overall is left alone entirely
-COLUMN_QUIET = 0.08         # a gutter bin carries at most this share of the peak coverage
+# A gutter bin carries at most this share of the coverage on the quieter side of it. Set
+# deliberately loose, because the two ways of being wrong are not equally bad: an extra cut
+# splits one column in half and each half still has a sane pitch, margin and order, while a
+# missing cut interleaves two columns' baselines and the measured line spacing becomes the
+# distance between neighbouring columns — 2.2pt on a page whose lines are 8pt apart.
+COLUMN_QUIET = 0.25
 COLUMN_GUTTER = 1.50        # ...and the quiet band must be this wide, x ref_h
 COLUMN_MIN_SHARE = 0.10     # both sides of a cut must hold this share of the strokes
 
@@ -335,6 +340,13 @@ def _columns(boxes, ref_h):
     Fully empty gutters are rare (a graph or a long formula leaks across), so the test is
     near-quiet rather than empty, and a cut is only taken when both sides hold a real share
     of the ink.
+
+    Quiet is judged **against the ink on either side of the band, not against the page's
+    busiest column.** Columns are rarely equally dense: on a real four-column page the
+    fullest column peaked at 58 lines deep and the sparsest at 39, and a threshold set from
+    the page maximum made the sparse column's gutter look busy. Two of three gutters were
+    missed, the columns merged, and the "line spacing" that came out was the distance
+    between neighbouring columns.
     """
     if len(boxes) < 4 * COLUMN_MIN_SHARE ** -1:
         return []
@@ -353,16 +365,28 @@ def _columns(boxes, ref_h):
         hi = min(bins - 1, max(0, int((b[2] - x0) / width)))
         for i in range(lo, hi + 1):
             cover[i] += 1
-    peak = max(cover)
-    if not peak:
+    if not max(cover):
         return []
 
-    quiet = peak * COLUMN_QUIET
+    # The tallest coverage to the left of each bin, and to the right of it. A band is a
+    # gutter when it is quiet against the *lesser* of the two, so a sparse column is judged
+    # against itself rather than against a dense one on the far side of the page.
+    left, right = [0] * bins, [0] * bins
+    run = 0
+    for i in range(bins):
+        run = max(run, cover[i])
+        left[i] = run
+    run = 0
+    for i in range(bins - 1, -1, -1):
+        run = max(run, cover[i])
+        right[i] = run
+
     runs, start = [], None
     for i, c in enumerate(cover):
-        if c <= quiet and start is None:
+        is_quiet = c <= min(left[i], right[i]) * COLUMN_QUIET
+        if is_quiet and start is None:
             start = i
-        elif c > quiet and start is not None:
+        elif not is_quiet and start is not None:
             runs.append((start, i))
             start = None
     if start is not None:
@@ -470,11 +494,27 @@ def analyze(boxes):
             line.words = [Word(indices=idx, box=line.box,
                                baseline=_baseline(idx, boxes, a.ref_h))]
 
+    return statistics(a, boxes)
+
+
+def statistics(a, boxes):
+    """Fill in the page-level numbers once `a.lines` exist. -> the same Analysis.
+
+    Split out from `analyze` because *where the lines are* and *what the page's rhythm is*
+    are separate questions. Geometry answers the first by clustering stroke boxes; OCR
+    answers it far better by reading the page (see `inkref.ink.grouping`). Neither changes
+    the second, so both share this.
+    """
     # Every statistic below is taken from writing only. One tall drawing dropped into a
     # page of notes would otherwise drag the pitch, the margin and the word gap with it,
     # and the text would be aligned to a shape that is not text.
     text = a.text_lines
-    a.columns = _columns(boxes, a.ref_h)
+    # Columns are found from the *line* boxes, not the stroke boxes. A line box is a solid
+    # horizontal run, so the projection has clean walls and clean gutters; a page's worth of
+    # individual stroke boxes is a sparse cloud in which a gutter is only slightly emptier
+    # than the text beside it. Same page, same code: 2 columns found from strokes, 4 from
+    # lines — and the 4 are the ones actually on the paper.
+    a.columns = _columns([l.box for l in text] or boxes, a.ref_h)
     a.blocks = [[k for k in g if a.lines[k].is_text]
                 for g in _assign_columns(a.lines, a.columns)]
     a.blocks = [g for g in a.blocks if g]
@@ -757,7 +797,7 @@ def regressed(before, after, ref_h):
     return None
 
 
-def verified_plan(a, boxes, s=BALANCED, roles=None):
+def verified_plan(a, boxes, s=BALANCED, roles=None, skip=()):
     """-> (offsets, strength_used, regression). A plan that is measured before it is kept.
 
     Structure detection is a guess, and on a page it reads badly — a dense multi-column
@@ -771,7 +811,8 @@ def verified_plan(a, boxes, s=BALANCED, roles=None):
     """
     s = strength(s)
     before = metrics(boxes, a, roles)
-    skip = set()
+    pinned = set(skip)          # switched off by the caller, never retired back on
+    skip = set(pinned)
     hurt = None
     for candidate in ([s] if s is LIGHT else [s, s, LIGHT]):
         offsets = plan(a, candidate, roles, skip=skip)
@@ -789,7 +830,7 @@ def verified_plan(a, boxes, s=BALANCED, roles=None):
         if offender and offender not in skip:
             skip.add(offender)
         else:
-            skip = set()          # nothing left to retire; fall through to a gentler pass
+            skip = set(pinned)    # nothing left to retire; fall through to a gentler pass
     return [(0.0, 0.0)] * a.n_boxes, None, hurt
 
 

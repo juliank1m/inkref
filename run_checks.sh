@@ -13,4 +13,5 @@ echo "== layout ==";     $PY tests/test_layout.py     | tail -1
 echo "== beautify ==";   $PY tests/test_beautify.py   | tail -1
 echo "== ai ==";         $PY tests/test_ai.py         | tail -1
 echo "== pdf ==";        $PY tests/test_pdf.py        | tail -1
+echo "== recognize ==";  $PY tests/test_recognize.py  | tail -1
 echo "== swift/python cross-check ==";  $PY tests/test_crosscheck.py | tail -1

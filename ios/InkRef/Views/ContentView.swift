@@ -141,6 +141,17 @@ struct ContentView: View {
     private var aiSection: some View {
         VStack(spacing: 12) {
             Divider().frame(maxWidth: 520)
+            Toggle("Read the page to find its words", isOn: $vm.readPage)
+                .fixedSize()
+            Text(vm.readPage
+                 ? "On-device text recognition finds the lines and words; the layout engine "
+                   + "then moves your original strokes. Nothing leaves the iPad."
+                 : "Lines and words are inferred from stroke spacing alone — faster, and "
+                   + "less reliable on cramped or mathematical writing.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 520)
             HStack(spacing: 24) {
                 Picker("Structure AI", selection: $vm.aiMode) {
                     ForEach(AIMode.allCases, id: \.self) { mode in
@@ -232,6 +243,14 @@ struct ContentView: View {
         }
         .toggleStyle(.button)
 
+        // Not a debug menu buried behind a build flag. When a page comes out looking much
+        // like it went in, this is the one control that says which stage decided that.
+        Toggle(isOn: $vm.showRecognition) {
+            Label("Reading", systemImage: "text.viewfinder")
+        }
+        .toggleStyle(.button)
+        .disabled(vm.pages.allSatisfy(\.recognized.isEmpty))
+
         Picker("Strength", selection: $vm.strength) {
             ForEach(InkLayout.Strength.all) { s in
                 Text(s.name.capitalized).tag(s)
@@ -271,6 +290,8 @@ struct ContentView: View {
             PreviewCanvas(strokes: page.strokes, offsets: page.offsets,
                           analysis: page.analysis, roles: page.roles,
                           showStructure: vm.showStructure,
+                          recognized: page.recognized, groups: page.groups,
+                          unmatched: page.unmatched, showRecognition: vm.showRecognition,
                           progress: vm.showRefactored ? 1 : 0,
                           paperSize: page.paperSize, background: page.background)
                 .padding(10)

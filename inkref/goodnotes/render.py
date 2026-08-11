@@ -75,6 +75,26 @@ def to_png(svg_text, scale=1.5):
         return None
 
 
+def to_png_tiles(svg_text, rects, scale=5.0):
+    """-> [PNG bytes] for each (x0, y0, x1, y1) clip, or None if no rasteriser.
+
+    `rects` are in the SVG's own *declared pixel* space, which `svg()` sets to points. The
+    document is parsed once: a page of ten thousand paths costs more to parse than to draw,
+    and re-parsing it per tile is what made a first tiled pass take seconds per page.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return None
+    try:
+        page = fitz.open(stream=svg_text.encode(), filetype="svg")[0]
+        m = fitz.Matrix(scale, scale)
+        return [page.get_pixmap(matrix=m, clip=fitz.Rect(*r)).tobytes("png")
+                for r in rects]
+    except Exception:
+        return None
+
+
 def render_file(path, out_path):
     its = items(Document.open(path))
     if not its:

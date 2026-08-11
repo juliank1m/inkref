@@ -32,7 +32,11 @@ private let tallRatio = 0.45           // a stroke this tall relative to refH ac
 private let headingLead = 1.35         // of pitch — room opened above a heading
 private let headingTrail = 1.15        // ...and below it
 private let rowMaxGap = 5.0            // a row is cut where it crosses a gap this wide, x refH
-private let columnQuiet = 0.08         // a gutter bin carries at most this share of peak coverage
+// A gutter bin carries at most this share of the coverage on the quieter side of it. Set
+// deliberately loose: an extra cut splits one column in half and each half still has a sane
+// pitch, margin and order, while a missing cut interleaves two columns' baselines and the
+// measured line spacing becomes the distance between neighbouring columns.
+private let columnQuiet = 0.25
 private let columnGutter = 1.50        // ...and the quiet band must be this wide, x refH
 private let columnMinShare = 0.10      // both sides of a cut must hold this share of the strokes
 // Ink outside the band a line of prose occupies — an exponent, a subscript, a fraction's
@@ -208,11 +212,27 @@ public enum InkLayout {
             }
         }
 
+        return statistics(a, boxes)
+    }
+
+    /// Fills in the page-level numbers once `a.lines` exist. -> the same Analysis.
+    ///
+    /// Split out from `analyze` because *where the lines are* and *what the page's rhythm
+    /// is* are separate questions. Geometry answers the first by clustering stroke boxes;
+    /// a text recogniser answers it far better by reading the page (`StrokeMapper`).
+    /// Neither changes the second, so both share this.
+    public static func statistics(_ a0: Analysis, _ boxes: [InkBox]) -> Analysis {
+        var a = a0
         // Every statistic below comes from writing only. One tall drawing dropped into a
         // page of notes would otherwise drag the pitch, the margin and the word gap with
         // it, and the text would be aligned to a shape that is not text.
         let text = a.textLines
-        a.columns = columnsOf(boxes, a.refH)
+        // Columns are found from the *line* boxes, not the stroke boxes. A line box is a
+        // solid horizontal run, so the projection has clean walls and clean gutters; a
+        // page's worth of individual stroke boxes is a sparse cloud in which a gutter is
+        // only slightly emptier than the text beside it. Same page, same code: 2 columns
+        // found from strokes, 4 from lines — and the 4 are the ones on the paper.
+        a.columns = columnsOf(text.isEmpty ? boxes : text.map(\.box), a.refH)
         a.blocks = assignColumns(a.lines, a.columns)
             .map { $0.filter { a.lines[$0].isText } }
             .filter { !$0.isEmpty }
@@ -449,11 +469,12 @@ public enum InkLayout {
     /// someone's notes, never making a page worse beats squeezing out the last alignment.
     public static func verifiedPlan(_ a: Analysis, boxes: [InkBox],
                                     strength s: Strength = .balanced,
-                                    roles: [Role]? = nil)
+                                    roles: [Role]? = nil,
+                                    skip pinned: Set<String> = [])
         -> (offsets: [Offset], used: Strength?, regression: String?) {
         let before = metrics(boxes, analysis: a, roles: roles)
         var hurt: String? = nil
-        var skip: Set<String> = []
+        var skip = pinned          // switched off by the caller, never retired back on
         for candidate in (s.name == "light" ? [s] : [s, s, .light]) {
             let offsets = plan(a, strength: candidate, roles: roles, skip: skip)
             let shifted = moved(boxes, offsets)
@@ -468,7 +489,7 @@ public enum InkLayout {
             if let offender = transformForMetric[hurt ?? ""], !skip.contains(offender) {
                 skip.insert(offender)
             } else {
-                skip.removeAll()
+                skip = pinned
             }
         }
         return ([Offset](repeating: Offset(), count: a.boxCount), nil, hurt)
@@ -504,7 +525,7 @@ public enum InkLayout {
 /// strokes of nearly zero height, and in a page of print-style handwriting they can
 /// outnumber the full-height ones. Take a near-maximum first, then the median of the
 /// strokes within reach of it — the letters that actually span the writing height.
-private func refHeight(_ boxes: [InkBox]) -> Double {
+func refHeight(_ boxes: [InkBox]) -> Double {
     let hs = boxes.map(\.height).filter { $0 > 0 }.sorted()
     guard !hs.isEmpty else { return 1.0 }
     let big = hs[Swift.min(hs.count - 1, Int(Double(hs.count) * 0.9))]   // robust near-max
@@ -513,7 +534,7 @@ private func refHeight(_ boxes: [InkBox]) -> Double {
 }
 
 /// Where a group of strokes sits. Bars and dots are excluded for the same reason.
-private func baselineOf(_ idxs: [Int], _ boxes: [InkBox], _ refH: Double) -> Double {
+func baselineOf(_ idxs: [Int], _ boxes: [InkBox], _ refH: Double) -> Double {
     let bottoms = idxs.filter { boxes[$0].height >= tallRatio * refH }.map { boxes[$0].y1 }
     return median(bottoms.isEmpty ? idxs.map { boxes[$0].y1 } : bottoms)
 }
@@ -665,13 +686,25 @@ private func columnsOf(_ boxes: [InkBox], _ refH: Double) -> [Double] {
         if lo <= hi { for i in lo...hi { cover[i] += 1 } }
     }
     guard let peak = cover.max(), peak > 0 else { return [] }
+    _ = peak
 
-    let quiet = Double(peak) * columnQuiet
+    // The tallest coverage to the left of each bin, and to the right of it. A band is a
+    // gutter when it is quiet against the *lesser* of the two, so a sparse column is judged
+    // against itself rather than against a dense one on the far side of the page.
+    var left = [Int](repeating: 0, count: bins), right = [Int](repeating: 0, count: bins)
+    var run = 0
+    for i in 0..<bins { run = Swift.max(run, cover[i]); left[i] = run }
+    run = 0
+    for i in stride(from: bins - 1, through: 0, by: -1) {
+        run = Swift.max(run, cover[i]); right[i] = run
+    }
+
     var runs: [(Int, Int)] = []
     var start: Int? = nil
     for (i, c) in cover.enumerated() {
-        if Double(c) <= quiet, start == nil { start = i }
-        else if Double(c) > quiet, let s = start { runs.append((s, i)); start = nil }
+        let isQuiet = Double(c) <= Double(Swift.min(left[i], right[i])) * columnQuiet
+        if isQuiet, start == nil { start = i }
+        else if !isQuiet, let s = start { runs.append((s, i)); start = nil }
     }
     if let s = start { runs.append((s, bins)) }
 
@@ -891,7 +924,7 @@ public func regressed(_ before: LayoutMetrics, _ after: LayoutMetrics,
 
 /// Swift's `sort` is not guaranteed stable; the Python reference relies on stability for
 /// tie-breaking (equal bottoms keep original stroke order), so ties fall back to position.
-private func stableSorted<T>(_ items: [T], by key: (T) -> Double) -> [T] {
+func stableSorted<T>(_ items: [T], by key: (T) -> Double) -> [T] {
     items.enumerated().sorted { a, b in
         let (ka, kb) = (key(a.element), key(b.element))
         return ka == kb ? a.offset < b.offset : ka < kb

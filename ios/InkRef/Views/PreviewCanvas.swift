@@ -28,6 +28,12 @@ struct PreviewCanvas: View {
     let analysis: InkLayout.Analysis?
     let roles: [Role]
     var showStructure = false
+    /// What the recogniser found and what it was mapped onto. Drawn only when asked; see
+    /// `RecognitionLayer` for why each layer is worth its ink.
+    var recognized: [RecognizedLine] = []
+    var groups: [WordGroup] = []
+    var unmatched: [Int] = []
+    var showRecognition = false
     var progress: Double = 0        // 0 = original, 1 = refactored
     /// The page's own size and template. Cropping to the ink instead is what made a page
     /// with a printed grid come out as bare strokes on white, at the wrong proportions.
@@ -54,6 +60,11 @@ struct PreviewCanvas: View {
                 InkLayer(ink: ink, fit: fit, progress: progress)
                 if let analysis, showStructure {
                     StructureLayer(analysis: analysis, roles: roles, fit: fit)
+                }
+                if showRecognition {
+                    RecognitionLayer(lines: recognized, groups: groups,
+                                     unmatched: unmatched.map { strokes[$0].box },
+                                     fit: fit)
                 }
             }
         }
@@ -229,6 +240,52 @@ private struct StructureLayer: View {
                                 .foregroundStyle(tint),
                              at: CGPoint(x: at.x + 6, y: at.y), anchor: .leading)
                 }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+
+/// Seeing which stage is wrong, instead of guessing from the final result.
+///
+/// The pipeline has several places to be wrong — the render, the recogniser, the coordinate
+/// transform, the mapping onto strokes — and every one of them fails the same way from the
+/// outside: the page comes out looking much like it went in. Each layer here answers one
+/// question, so a wrong page can be attributed rather than debated:
+///
+///   red    recognised line  — did it find the writing, and in the right place?
+///                             (a box in the wrong place is a transform bug)
+///   amber  recognised word  — did it split the line into words?
+///   green  word group       — did the right ORIGINAL strokes get attached to that word?
+///                             drawn from the strokes, not from the recogniser's box, so
+///                             a green box adrift from its red one is a mapping bug
+///   blue   unmatched        — what was deliberately left alone. Expected over a diagram,
+///                             a problem over prose.
+private struct RecognitionLayer: View {
+    let lines: [RecognizedLine]
+    let groups: [WordGroup]
+    let unmatched: [InkBox]
+    let fit: PageFit
+
+    var body: some View {
+        Canvas { ctx, _ in
+            for box in unmatched {
+                let r = Path(fit.rect(box))
+                ctx.fill(r, with: .color(.blue.opacity(0.16)))
+            }
+            for line in lines {
+                for word in line.words {
+                    ctx.stroke(Path(fit.rect(word.box)), with: .color(.orange.opacity(0.8)),
+                               style: StrokeStyle(lineWidth: 0.7, dash: [4, 3]))
+                }
+                ctx.stroke(Path(fit.rect(line.box)), with: .color(.red.opacity(0.85)),
+                           lineWidth: 1)
+            }
+            for group in groups {
+                let r = Path(fit.rect(group.box))
+                ctx.fill(r, with: .color(.green.opacity(0.12)))
+                ctx.stroke(r, with: .color(.green), lineWidth: 0.8)
             }
         }
         .allowsHitTesting(false)

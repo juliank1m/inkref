@@ -22,6 +22,10 @@ struct PagePreview: Identifiable {
     var before: LayoutMetrics
     var after: LayoutMetrics
     var source: String                  // which classifier named the roles
+    var structure = "geometry"          // "ocr" or "geometry" — who found the lines
+    var recognized: [RecognizedLine] = []   // for the debug overlay
+    var groups: [WordGroup] = []
+    var unmatched: [Int] = []           // strokes no group claimed; deliberately untouched
 
     var improvement: LayoutMetrics { after.improvement(over: before) }
     var moved: Int { offsets.filter { !$0.isZero }.count }
@@ -31,6 +35,13 @@ struct PagePreview: Identifiable {
         let named = Set(roles.filter { $0 != .paragraph }.map(\.rawValue)).sorted()
         var parts = ["\(strokes.count) strokes", "\(analysis.lines.count) lines",
                      "\(words) words", "\(moved) moved"]
+        if structure == "ocr" {
+            let read = groups.reduce(0) { $0 + $1.indices.count }
+            let share = strokes.isEmpty ? 0 : Double(read) / Double(strokes.count)
+            // The share is the honest headline: the rest of the page was left untouched
+            // on purpose, and saying so is the difference between "safe" and "broken".
+            parts.append(String(format: "read %.0f%% of the ink", share * 100))
+        }
         parts.append(named.isEmpty ? "structure via \(source)"
                                    : "\(source): " + named.joined(separator: ", "))
         // Saying nothing here would make a deliberately untouched page look like a bug.
@@ -50,8 +61,16 @@ private struct PageGeometry {
     let paperSize: CGSize?
     let background: Data?
     let strokes: [StrokePath]
-    let analysis: InkLayout.Analysis
-    let blocks: [BlockDescription]
+    let analysis: InkLayout.Analysis      // from geometry; the fallback, and sizes the tiles
+}
+
+/// What reading the page found. Empty when recognition is off or found nothing, in which
+/// case the geometry analysis stands.
+private struct PageReading {
+    var lines: [RecognizedLine] = []
+    var groups: [WordGroup] = []
+    var unmatched: [Int] = []
+    var analysis: InkLayout.Analysis? = nil
 }
 
 private enum RefactorError: LocalizedError {
@@ -70,7 +89,12 @@ final class RefactorViewModel {
     var strength: InkLayout.Strength = .balanced
     var aiMode: AIMode = .auto
     var useVision = false
+    /// Read the page with Vision to find its lines and words, instead of clustering stroke
+    /// boxes. On by default: it is the difference between guessing where a word ends and
+    /// knowing. On device, so it costs nothing but a few seconds.
+    var readPage = true
     var showStructure = false
+    var showRecognition = false
     var showRefactored = false
     var status: Status = .idle
     var pages: [PagePreview] = []
@@ -123,9 +147,14 @@ final class RefactorViewModel {
 
         let analyzer = makeAnalyzer(aiMode)
         let requested = strength      // one run, one strength, even if the picker moves
+        let reading = readPage      // one run, one setting
         var built: [PagePreview] = []
         for page in geometry {
-            var roles = [Role](repeating: .paragraph, count: page.analysis.lines.count)
+            // Reading the page comes first: it decides where the lines and words are, and
+            // every role, block description and metric below is about *those* lines.
+            let read = reading ? await Self.read(page) : PageReading()
+            let analysis = read.analysis ?? page.analysis
+            var roles = [Role](repeating: .paragraph, count: analysis.lines.count)
             var groups: [[Int]] = []
             var source = analyzer == nil ? "geometry only" : "geometry"
             if let analyzer {
@@ -134,12 +163,13 @@ final class RefactorViewModel {
                 // it — rendering one per page for the heuristic is pure waste.
                 let image = useVision && analyzer is BackboardAnalyzer
                     ? pageImage(page.strokes) : nil
-                let result = await analyzer.analyze(page.blocks, image: image)
+                let result = await analyzer.analyze(InkLayout.describe(analysis), image: image)
                 if result.roles.count == roles.count { roles = result.roles }
                 source = result.source
                 groups = result.groups
             }
-            built.append(await Self.finish(page, strength: requested, roles: roles,
+            built.append(await Self.finish(page, analysis: analysis, read: read,
+                                           strength: requested, roles: roles,
                                            groups: groups, source: source))
         }
 
@@ -223,28 +253,50 @@ final class RefactorViewModel {
             let analysis = InkLayout.analyze(strokes.map(\.box))
             out.append(PageGeometry(id: page.id, paperSize: page.paper?.size,
                                     background: doc.background(for: page),
-                                    strokes: strokes, analysis: analysis,
-                                    blocks: InkLayout.describe(analysis)))
+                                    strokes: strokes, analysis: analysis))
         }
         return (doc.pages.count, out)
     }
 
-    private nonisolated static func finish(_ page: PageGeometry, strength: InkLayout.Strength,
+    /// Render the page, read it, and map what came back onto its own strokes.
+    ///
+    /// Everything Vision needs is on device, so this costs nothing but time and nothing
+    /// leaves the iPad. A page it cannot read comes back empty and geometry stands.
+    private nonisolated static func read(_ page: PageGeometry) async -> PageReading {
+        let boxes = page.strokes.map(\.box)
+        let recognizer = VisionRecognizer()
+        var lines: [RecognizedLine] = []
+        for (image, transform) in PageRender.tiles(page.strokes, paper: page.paperSize,
+                                                   refH: page.analysis.refH) {
+            lines += (try? recognizer.recognize(image, in: transform)) ?? []
+        }
+        guard !lines.isEmpty else { return PageReading() }
+        lines = Recognition.mergeStacked(Recognition.dedupe(lines))
+        let (groups, unmatched) = StrokeMapper.map(lines, boxes: boxes)
+        guard !groups.isEmpty else { return PageReading() }
+        return PageReading(lines: lines, groups: groups, unmatched: unmatched,
+                           analysis: StrokeMapper.analysis(groups, boxes: boxes))
+    }
+
+    private nonisolated static func finish(_ page: PageGeometry,
+                                           analysis read: InkLayout.Analysis,
+                                           read reading: PageReading,
+                                           strength: InkLayout.Strength,
                                            roles: [Role], groups: [[Int]] = [],
                                            source: String) async -> PagePreview {
         let boxes = page.strokes.map(\.box)
         // what the model grouped becomes one rigid line, so the plan cannot reach inside
         // an equation to re-space it
-        let analysis = groups.isEmpty ? page.analysis
-                                      : InkLayout.mergeGroups(page.analysis, groups)
+        let analysis = groups.isEmpty ? read : InkLayout.mergeGroups(read, groups)
         let planRoles = groups.isEmpty ? roles : nil
         // verifiedPlan, not plan: a plan measured to make the page worse is eased and then
         // dropped, so a page can come back unchanged but never degraded.
         let (offsets, used, declined) = InkLayout.verifiedPlan(
-            analysis, boxes: boxes, strength: strength, roles: planRoles)
+            analysis, boxes: boxes, strength: strength, roles: planRoles,
+            skip: reading.analysis == nil ? [] : ["line"])
         return PagePreview(
             id: page.id, strokes: page.strokes, offsets: offsets,
-            paperSize: page.paperSize, background: page.background, analysis: page.analysis,
+            paperSize: page.paperSize, background: page.background, analysis: read,
             roles: roles, strengthUsed: used?.name, declined: declined,
             // Scored on the structure the plan was actually made against, and on the same
             // lines before and after — the numbers must agree with the guard that accepted
@@ -256,7 +308,9 @@ final class RefactorViewModel {
                                          analysis: reproject(analysis, shifted),
                                          roles: planRoles)
             }(),
-            source: source)
+            source: source,
+            structure: reading.analysis == nil ? "geometry" : "ocr",
+            recognized: reading.lines, groups: reading.groups, unmatched: reading.unmatched)
     }
 
     private nonisolated static func write(source: URL, pages: [PagePreview],

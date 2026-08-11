@@ -213,6 +213,131 @@ def test_swift_beautify_output_is_readable_by_python(binary):
               f"{moved} moved, none deformed")
 
 
+def recognition_fixture():
+    """Recognised lines over a real page, frozen to JSON.
+
+    Deliberately not synthetic. The mapping only gets interesting where writing is dense
+    and boxes overlap — a tidy fixture agrees trivially, in both engines, for the wrong
+    reason. Generated from a sample archive by geometry, then perturbed into the shape a
+    recogniser actually returns: boxes a little loose, a few duplicates from tile overlap,
+    a few readings straddling their neighbour.
+    """
+    from inkref.ink import layout
+
+    doc = Document.open(multi_column_fixture())
+    page = max(doc.pages, key=lambda p: len(p.live))
+    _, boxes = bt.page_boxes(page)
+    a = layout.analyze(boxes)
+
+    lines = []
+    for k, line in enumerate(a.lines):
+        pad = 0.12 * a.ref_h                      # a recogniser's box is loose, not tight
+        lines.append({
+            "text": f"line{k}",
+            "box": [line.box[0] - pad, line.box[1] - pad,
+                    line.box[2] + pad, line.box[3] + pad],
+            "confidence": 1.0 - (k % 5) * 0.05,
+            "words": [{"text": f"w{k}_{j}",
+                       "box": [w.box[0] - pad, w.box[1] - pad,
+                               w.box[2] + pad, w.box[3] + pad],
+                       "confidence": 1.0 - (j % 3) * 0.1}
+                      for j, w in enumerate(line.words)],
+        })
+        if k % 7 == 0:                            # a duplicate, as overlapping tiles give
+            dup = {**lines[-1], "confidence": 0.5,
+                   "words": [dict(w) for w in lines[-1]["words"]]}
+            lines.append(dup)
+        if k % 5 == 0 and k + 1 < len(a.lines):   # a reading straddling the line below
+            nxt = a.lines[k + 1]
+            lines.append({
+                "text": f"straddle{k}",
+                "box": [line.box[0], (line.box[1] + line.box[3]) / 2,
+                        line.box[0] + 0.4 * (line.box[2] - line.box[0]),
+                        (nxt.box[1] + nxt.box[3]) / 2],
+                "confidence": 0.8,
+                "words": [{"text": f"s{k}", "box": [line.box[0], line.box[1],
+                                                    line.box[2], nxt.box[3]],
+                           "confidence": 0.8}],
+            })
+    # A sketch off to one side that no reading covers. Both engines must leave it alone,
+    # and identically — without this the fixture never exercises the unmatched path at all.
+    far = max(b[2] for b in boxes) + 40.0
+    sketch = [(far + 10 * i, 30.0 * i, far + 10 * i + 8, 30.0 * i + 25) for i in range(6)]
+    return {"boxes": [list(b) for b in boxes] + [list(b) for b in sketch],
+            "lines": lines}
+
+
+def test_engines_agree_on_recognition_mapping(binary):
+    """The recogniser is not under test; everything between it and the planner is.
+
+    Vision reads differently on a different OS, so identical transcription would be a test
+    of Apple. Which strokes a word claims, what merges, what is left untouched and what
+    plan comes out of it are ours, and they must not drift.
+    """
+    import json
+
+    from inkref.ink import grouping, layout, recognize
+    from inkref.ink.recognize import RecognizedLine, RecognizedWord
+
+    data = recognition_fixture()
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(data, fh)
+        path = fh.name
+    try:
+        proc = subprocess.run([binary, "--recognition", path],
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        swift = proc.stdout
+
+        boxes = [tuple(b) for b in data["boxes"]]
+        lines = [RecognizedLine(
+            text=l["text"], box=tuple(l["box"]), confidence=l["confidence"],
+            words=[RecognizedWord(w["text"], tuple(w["box"]), w["confidence"])
+                   for w in l["words"]])
+            for l in data["lines"]]
+        merged = recognize.merge_stacked(recognize.dedupe(lines))
+        groups, unmatched = grouping.map_strokes(merged, boxes)
+
+        out = [f"recognition lines={len(merged)} groups={len(groups)} "
+               f"unmatched={len(unmatched)}"]
+        for g in groups:
+            out.append("  %-24s %-16s %s" % (
+                g.text, ",".join(str(i) for i in g.indices),
+                "%.4f %.4f %.4f %.4f" % g.box))
+        out.append("  unmatched " + ",".join(str(i) for i in unmatched))
+
+        a = grouping.analysis(groups, boxes)
+        out.append("analysis lines=%d refH=%.4f pitch=%.4f blocks=%d wordGap=%.4f"
+                   % (len(a.lines), a.ref_h, a.pitch, len(a.blocks), a.word_gap))
+        for k, line in enumerate(a.lines):
+            out.append("  L%02d base=%.4f level=%d block=%d rigid=%d words=%d"
+                       % (k, line.baseline, line.level, line.block,
+                          1 if line.rigid else 0, len(line.words)))
+        # skip="line" is what beautify.plan_skip pins on any OCR-structured page; the
+        # digest has to plan the same way the product does or it proves nothing.
+        for k, (dx, dy) in enumerate(layout.plan(a, layout.BALANCED, skip={"line"})):
+            if dx or dy:
+                out.append("  offset %d %.4f %.4f" % (k, dx, dy))
+        python = "\n".join(out) + "\n"
+
+        if python != swift:
+            s, p = swift.splitlines(), python.splitlines()
+            for i, (a_, b_) in enumerate(zip(s, p)):
+                if a_ != b_:
+                    raise AssertionError(
+                        f"engines disagree at line {i}\n  swift:  {a_}\n  python: {b_}")
+            raise AssertionError(f"digests differ in length: {len(s)} vs {len(p)}")
+        assert len(groups) > 20, f"fixture too thin to prove anything: {len(groups)}"
+        assert unmatched, "fixture never exercises the leave-it-alone path"
+        offsets = layout.plan(a, layout.BALANCED)
+        assert all(offsets[i] == (0.0, 0.0) for i in unmatched), \
+            "a stroke no group claimed was moved"
+        print(f"  recognition agrees: {len(merged)} lines, {len(groups)} groups, "
+              f"{len(unmatched)} strokes left untouched, identical plans")
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as workdir:
         binary = build_harness(workdir)
@@ -221,6 +346,7 @@ if __name__ == "__main__":
             print("\nall checks passed")
             sys.exit(0)
         for fn in [test_engines_agree, test_engines_agree_on_layout,
+                   test_engines_agree_on_recognition_mapping,
                    test_swift_layout_selfcheck,
                    test_swift_beautify_output_is_readable_by_python]:
             print(fn.__name__)
