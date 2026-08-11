@@ -45,7 +45,8 @@ def cmd_analyze(args):
 
 def cmd_beautify(args):
     out = args.output or _out(args.input, ".beautified", ".goodnotes")
-    report = bt.beautify_file(args.input, out, args.strength, _analyzer(args), args.vision)
+    report = bt.beautify_file(args.input, out, args.strength, _analyzer(args), args.vision,
+                              smooth=args.smooth)
     print(report.summary())
     print(f"\nwrote {out}")
     if args.preview:
@@ -105,6 +106,9 @@ def build_parser():
                              "BACKBOARD_API_KEY is set, geometry heuristics otherwise")
         sp.add_argument("--vision", action="store_true",
                         help="send a rendered page image with the classification request")
+        sp.add_argument("--smooth", action="store_true",
+                        help="also damp the tremble in each stroke (changes letter shape, "
+                             "never regenerates it)")
 
     a = sub.add_parser("analyze", help="print the detected structure, change nothing")
     a.add_argument("input")

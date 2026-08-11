@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass, field
 
 from ..ink import layout
+from ..ink import smooth as smoothing
 from . import render
 from . import strokes as strokes_mod
 from .document import Document, POINTS_PER_UNIT, UNITS_PER_POINT
@@ -34,6 +35,7 @@ class PageReport:
     semantic: object = None                   # ai.SemanticResult, when a classifier ran
     strength_used: object = None              # may be gentler than asked, or None = declined
     declined: object = None                   # the measure that stopped the plan being kept
+    faired: int = 0                           # strokes whose tremble was damped
     boxes: list = field(default_factory=list)     # points, before
     offsets: list = field(default_factory=list)
 
@@ -71,7 +73,8 @@ class Report:
                 + ("" if p.strength_used in (None, self.strength)
                    else f"  [eased to {p.strength_used}]")
                 + ("" if not p.declined
-                   else f"  [declined: would worsen {p.declined}]"))
+                   else f"  [declined: would worsen {p.declined}]")
+                + ("" if not p.faired else f"  [faired {p.faired} strokes]"))
             # after its own page header, not before it — printed first, this read as though
             # it belonged to the page above
             if p.semantic:
@@ -139,7 +142,37 @@ def classify(page, analysis, analyzer, vision=False):
     return analyzer.analyze(layout.describe(analysis), image)
 
 
-def beautify_document(doc, strength="balanced", apply=True, analyzer=None, vision=False):
+def fair_page(page, iterations=2):
+    """Damp the tremble in every stroke this code can author. -> how many were faired.
+
+    Constant-width only, and that is not a limitation here: it is the family GoodNotes
+    itself uses for a real notebook, and the only one we can write back. Colour, width and
+    every undecoded field are untouched; only the polyline changes, and its endpoints do
+    not move, so nothing the layout engine measured is invalidated.
+
+    Off by default. Unlike every other transform in this file it changes a letter's shape
+    rather than its position, so it is the user's call, not ours.
+    """
+    done = 0
+    for rec in page.live:
+        sig, members = rec.geometry
+        if sig not in (strokes_mod.CONSTANT_WIDTH, strokes_mod.CONSTANT_WIDTH_V1):
+            continue
+        pts = strokes_mod.on_curve_points(sig, members)
+        if len(pts) < 4:
+            continue
+        faired = smoothing.fair(pts, iterations=iterations)
+        if len(faired) < 2:
+            continue
+        width = strokes_mod.svg_path(sig, members)[1]
+        rec.geometry = strokes_mod.Stroke(points=faired, width=width,
+                                          family=sig).to_tpl()
+        done += 1
+    return done
+
+
+def beautify_document(doc, strength="balanced", apply=True, analyzer=None, vision=False,
+                      smooth=False):
     """Mutate `doc` in memory. Returns a Report; with apply=False it only measures."""
     s = layout.strength(strength)
     report = Report(strength=s.name)
@@ -175,6 +208,9 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
         pr.moved = sum(1 for dx, dy in offsets if dx or dy)
         pr.max_shift = max((max(abs(dx), abs(dy)) for dx, dy in offsets), default=0.0)
 
+        if apply and smooth:
+            # before the offsets, so the layout is planned on the geometry as written
+            pr.faired = fair_page(page)
         if apply:
             for rec, (dx, dy) in zip(recs, offsets):
                 if dx or dy:
@@ -182,7 +218,8 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
     return report
 
 
-def beautify_file(in_path, out_path, strength="balanced", analyzer=None, vision=False):
+def beautify_file(in_path, out_path, strength="balanced", analyzer=None, vision=False,
+                  smooth=False):
     """Read `in_path`, write a beautified copy to `out_path`. The input is never touched.
 
     SPEC §15: transformations happen on a copy, and unknown document structures pass
@@ -191,7 +228,8 @@ def beautify_file(in_path, out_path, strength="balanced", analyzer=None, vision=
     if os.path.abspath(in_path) == os.path.abspath(out_path):
         raise ValueError("refusing to overwrite the source document; pick another path")
     doc = Document.open(in_path)
-    report = beautify_document(doc, strength, analyzer=analyzer, vision=vision)
+    report = beautify_document(doc, strength, analyzer=analyzer, vision=vision,
+                               smooth=smooth)
     doc.write(out_path)
     return report
 
