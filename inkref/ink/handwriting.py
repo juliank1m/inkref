@@ -146,8 +146,39 @@ LECTURE = [
 ]
 
 
+def columns(count=3, rows=14, seed=11, size=9.0, gutter=26.0, page_w=595.0,
+            page_h=842.0, left=40.0, top=60.0, mess=None, **kw):
+    """A dense multi-column page, the shape real lecture notes actually take.
+
+    The single-column fixture never exercises column detection, per-column pitch, or the
+    partial-plan fallback — the paths a real four-column calculus page broke. Without a
+    fixture like this the cross-check compares the two engines only where both trivially
+    agree.
+    """
+    mess = mess if mess is not None else Mess()
+    width = (page_w - 2 * left - gutter * (count - 1)) / count
+    page = InkPage(width=page_w, height=page_h)
+    # kept short on purpose: a phrase wider than its column fills the gutter and there is
+    # no column left to detect
+    body = ["GRADIENT", "- STEP SIZE", "- LOSS", "CONVEX SET",
+            "- JENSEN", "DUAL FORM", "- KKT"]
+    for c in range(count):
+        lines = [((k % 3 == 2), body[(c * 5 + k) % len(body)]) for k in range(rows)]
+        col = page_of_lines([(1 if ind else 0, text) for ind, text in lines],
+                            size=size, page_w=page_w, page_h=page_h,
+                            left=left + c * (width + gutter), top=top,
+                            pitch=size * 1.9, indent=size * 1.6,
+                            mess=mess, seed=seed + c * 17, **kw)
+        page.strokes.extend(col.strokes)
+    return page
+
+
 def messy_notes(seed=7, mess=None, title="messy lecture notes", **kw):
     """The demo page: the SPEC §9 lecture notes, written badly on purpose."""
     doc = InkDocument(title=title)
     doc.add_page(page(LECTURE, mess=mess if mess is not None else Mess(), seed=seed, **kw))
     return doc
+
+
+# the column builder above composes the single-column layout
+page_of_lines = page

@@ -34,6 +34,30 @@ ARCHIVES += [p for p in [os.path.join(ROOT, "generated", "04_stress_1000.goodnot
              if os.path.exists(p)]
 
 
+def multi_column_fixture():
+    """A dense multi-column page, built if it is not already there.
+
+    The public samples are single-column and tiny, so on them both engines take the first
+    plan and agree trivially — column detection, per-column pitch and the partial-plan
+    fallback are never compared at all. This fixture is the one that would actually catch
+    a divergence in them.
+    """
+    path = os.path.join(ROOT, "generated", "_columns.goodnotes")
+    if not os.path.exists(path):
+        from inkref.goodnotes.writer import GoodNotesWriter
+        from inkref.ink import handwriting
+        from inkref.ink.model import InkDocument
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        doc = InkDocument(title="columns")
+        doc.add_page(handwriting.columns())
+        GoodNotesWriter(os.path.join(ROOT, "samples", "test.goodnotes")).write(
+            doc, path, clear_existing=True)
+    return path
+
+
+ARCHIVES.append(multi_column_fixture())
+
+
 def python_digest(path):
     """The same canonical form ios/Tools/CrossCheck.swift prints."""
     doc = Document.open(path)

@@ -127,7 +127,8 @@ def page_html(page, s, analyzer=None, vision=False):
     roles = sem.roles if sem else None
     offsets = layout.plan(a, s, roles)
     before = layout.metrics(boxes, a, roles)
-    after = layout.metrics(layout.moved(boxes, offsets), roles=roles)
+    shifted = layout.moved(boxes, offsets)
+    after = layout.metrics(shifted, layout.reproject(a, shifted), roles)
 
     paths = []
     for (rec, _, d, w), (dx, dy) in zip(drawn, offsets):

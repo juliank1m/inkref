@@ -501,7 +501,7 @@ def _bullet_offsets(a, roles):
     return {lvl: median(v) for lvl, v in found.items()}
 
 
-def plan(a, s=BALANCED, roles=None):
+def plan(a, s=BALANCED, roles=None, skip=()):
     """Analysis -> [(dx, dy)] parallel to the original box list.
 
     All translations, composed per word:
@@ -513,6 +513,11 @@ def plan(a, s=BALANCED, roles=None):
     `roles` is one role per line, in `a.lines` order — usually from `inkref.ai`, and
     `None` means treat everything as prose. A role never supplies a coordinate; it only
     chooses which of the rules above apply, which is the whole point of the split.
+
+    `skip` switches individual corrections off by name — "baseline", "line", "margin",
+    "spacing". A page can be well served by three of them and hurt by the fourth, and
+    abandoning the whole plan over one throws away the other three (SPEC §8.4-§8.7 are
+    separate promises, not a bundle).
     """
     s = strength(s)
     offsets = [(0.0, 0.0)] * a.n_boxes
@@ -535,16 +540,16 @@ def plan(a, s=BALANCED, roles=None):
     # Line spacing is resolved inside each column. Running it over the page-ordered list
     # would space a line against whichever column happened to sit beside it.
     targets = [l.baseline for l in a.lines]
-    for group in a.blocks:
+    for group in ([] if "line" in skip else a.blocks):
         local = _line_targets([a.lines[k].baseline for k in group], a.pitch, s,
                               lambda i: roles[group[i]], lambda i: frozen(group[i]))
         for i, k in enumerate(group):
             targets[k] = local[i]
     bullets = _bullet_offsets(a, roles)
     cap = s.max_shift * a.ref_h
-    base_dead, base_gain = s.baseline
-    marg_dead, marg_gain = s.margin
-    sp_dead, sp_gain = s.spacing
+    base_dead, base_gain = (0.0, 0.0) if 'baseline' in skip else s.baseline
+    marg_dead, marg_gain = (0.0, 0.0) if 'margin' in skip else s.margin
+    sp_dead, sp_gain = (0.0, 0.0) if 'spacing' in skip else s.spacing
 
     for k, (line, target, role) in enumerate(zip(a.lines, targets, roles)):
         if frozen(k):
@@ -586,6 +591,46 @@ def _clamp(v, cap):
     return max(-cap, min(cap, v))
 
 
+def reproject(a, boxes):
+    """The same structure, re-measured on moved boxes. Membership is not recomputed.
+
+    Scoring a plan by re-analysing the result compares two different structures: on a
+    dense page the regrouping shifts a little, and that churn shows up as a regression
+    that no correction caused. Keeping the line and word membership fixed and only
+    recomputing where those lines now sit measures the thing actually claimed — did *these*
+    lines get tidier — and makes the before/after comparison like-for-like.
+    """
+    out = Analysis(ref_h=a.ref_h, levels=list(a.levels), blocks=[list(g) for g in a.blocks],
+                   columns=list(a.columns), word_gap=a.word_gap, n_boxes=len(boxes))
+    for line in a.lines:
+        words = [Word(indices=list(w.indices),
+                      box=_union([boxes[i] for i in w.indices]),
+                      baseline=_baseline(w.indices, boxes, a.ref_h))
+                 for w in line.words]
+        out.lines.append(Line(words=words,
+                              box=_union([boxes[i] for i in line.indices]),
+                              baseline=_baseline(line.indices, boxes, a.ref_h),
+                              level=line.level, level_x=line.level_x,
+                              block=line.block, is_text=line.is_text))
+    # pitch is re-derived, because how evenly the lines now sit is exactly what is scored
+    diffs = []
+    for group in out.blocks:
+        rows = sorted((out.lines[k] for k in group), key=lambda l: l.baseline)
+        diffs += [b.baseline - t.baseline for t, b in zip(rows, rows[1:])
+                  if b.baseline - t.baseline > 0]
+    out.pitch = median(diffs) if diffs else a.pitch
+    return out
+
+
+# Which correction to retire when a given measure gets worse.
+TRANSFORM_FOR_METRIC = {
+    "baseline_spread": "baseline",
+    "pitch_spread": "line",
+    "margin_spread": "margin",
+    "gap_spread": "spacing",
+}
+
+
 def regressed(before, after, ref_h):
     """True if any measure got materially worse. Noise near zero does not count."""
     for key, was in before.items():
@@ -609,12 +654,25 @@ def verified_plan(a, boxes, s=BALANCED, roles=None):
     """
     s = strength(s)
     before = metrics(boxes, a, roles)
-    for candidate in ([s] if s is LIGHT else [s, LIGHT]):
-        offsets = plan(a, candidate, roles)
-        after = metrics(moved(boxes, offsets), roles=roles)
+    skip = set()
+    hurt = None
+    for candidate in ([s] if s is LIGHT else [s, s, LIGHT]):
+        offsets = plan(a, candidate, roles, skip=skip)
+        shifted = moved(boxes, offsets)
+        after = metrics(shifted, reproject(a, shifted), roles)
         hurt = regressed(before, after, a.ref_h)
         if hurt is None:
             return offsets, candidate, None
+        # Retire only the correction that did the damage and try again. The four are
+        # separate promises, and a page can be well served by three of them while the
+        # fourth is wrong for it — a dense formula sheet gains a straight left margin
+        # even where its line rhythm is too irregular to normalise. Dropping the whole
+        # plan over one bad measure throws the other three away.
+        offender = TRANSFORM_FOR_METRIC.get(hurt)
+        if offender and offender not in skip:
+            skip.add(offender)
+        else:
+            skip = set()          # nothing left to retire; fall through to a gentler pass
     return [(0.0, 0.0)] * a.n_boxes, None, hurt
 
 

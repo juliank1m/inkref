@@ -256,9 +256,13 @@ public enum InkLayout {
     /// `roles` is one role per line, in `a.lines` order — usually from the AI layer, and
     /// `nil` means treat everything as prose. A role never supplies a coordinate; it only
     /// chooses which of the rules above apply, which is the whole point of the split.
+    /// `skip` switches individual corrections off by name — "baseline", "line", "margin",
+    /// "spacing". A page can be well served by three of them and hurt by the fourth, and
+    /// abandoning the whole plan over one throws the other three away.
     public static func plan(_ a: Analysis,
                             strength s: Strength = .balanced,
-                            roles: [Role]? = nil) -> [Offset] {
+                            roles: [Role]? = nil,
+                            skip: Set<String> = []) -> [Offset] {
         var offsets = [Offset](repeating: Offset(), count: a.boxCount)
         guard !a.lines.isEmpty else { return offsets }
         let role = roleLookup(roles)
@@ -276,7 +280,7 @@ public enum InkLayout {
         // Line spacing is resolved inside each column; over the page-ordered list a line
         // would be spaced against whichever column happened to sit beside it.
         var targets = a.lines.map(\.baseline)
-        for group in a.blocks {
+        for group in (skip.contains("line") ? [] : a.blocks) {
             let local = lineTargets(group.map { a.lines[$0].baseline }, a.pitch, s,
                                     { role(group[$0]) }, { frozen(group[$0]) })
             for (i, k) in group.enumerated() { targets[k] = local[i] }
@@ -289,7 +293,8 @@ public enum InkLayout {
             if frozen(k) { continue }               // keeps Offset(): never touched
             let ldy = targets[k] - line.baseline
             let levelX = line.levelX
-            let ldx = correct(levelX - line.box.x0, s.margin.deadband * a.refH, s.margin.gain)
+            let ldx = skip.contains("margin") ? 0
+                : correct(levelX - line.box.x0, s.margin.deadband * a.refH, s.margin.gain)
             let hang = bullets[BulletKey(block: line.block, level: line.level)]
             let listed = r == .bullet && hang != nil && line.words.count >= 2
                 && isMark(line.words[0], a.refH)
@@ -388,11 +393,23 @@ public enum InkLayout {
         -> (offsets: [Offset], used: Strength?, regression: String?) {
         let before = metrics(boxes, analysis: a, roles: roles)
         var hurt: String? = nil
-        for candidate in (s.name == "light" ? [s] : [s, .light]) {
-            let offsets = plan(a, strength: candidate, roles: roles)
-            let after = metrics(moved(boxes, offsets), analysis: nil, roles: roles)
+        var skip: Set<String> = []
+        for candidate in (s.name == "light" ? [s] : [s, s, .light]) {
+            let offsets = plan(a, strength: candidate, roles: roles, skip: skip)
+            let shifted = moved(boxes, offsets)
+            // scored on the same lines, not a re-analysis: structural churn on a dense
+            // page otherwise reads as a regression that no correction caused
+            let after = metrics(shifted, analysis: reproject(a, shifted), roles: roles)
             hurt = regressed(before, after, a.refH)
             if hurt == nil { return (offsets, candidate, nil) }
+            // Retire only the correction that did the damage and try again. The four are
+            // separate promises; a dense formula sheet gains a straight left margin even
+            // where its line rhythm is too irregular to normalise.
+            if let offender = transformForMetric[hurt ?? ""], !skip.contains(offender) {
+                skip.insert(offender)
+            } else {
+                skip.removeAll()
+            }
         }
         return ([Offset](repeating: Offset(), count: a.boxCount), nil, hurt)
     }
@@ -699,6 +716,47 @@ private func bulletOffsets(_ a: InkLayout.Analysis,
             .append(line.words[1].box.x0 - line.levelX)
     }
     return found.mapValues(median)
+}
+
+/// Which correction to retire when a given measure gets worse.
+let transformForMetric = ["baseline": "baseline", "pitch": "line",
+                          "margin": "margin", "gap": "spacing"]
+
+/// The same structure, re-measured on moved boxes. Membership is not recomputed.
+///
+/// Scoring a plan by re-analysing the result compares two different structures: on a dense
+/// page the regrouping shifts a little and that churn shows up as a regression no
+/// correction caused. Holding line and word membership fixed measures the thing actually
+/// claimed — did *these* lines get tidier.
+public func reproject(_ a: InkLayout.Analysis, _ boxes: [InkBox]) -> InkLayout.Analysis {
+    var out = InkLayout.Analysis()
+    out.refH = a.refH
+    out.levels = a.levels
+    out.blocks = a.blocks
+    out.columns = a.columns
+    out.wordGap = a.wordGap
+    out.boxCount = boxes.count
+    for line in a.lines {
+        let words = line.words.map { w in
+            InkLayout.Word(indices: w.indices,
+                           box: InkBox.union(w.indices.map { boxes[$0] }),
+                           baseline: baselineOf(w.indices, boxes, a.refH))
+        }
+        out.lines.append(InkLayout.Line(
+            words: words,
+            box: InkBox.union(line.indices.map { boxes[$0] }),
+            baseline: baselineOf(line.indices, boxes, a.refH),
+            level: line.level, levelX: line.levelX, block: line.block, isText: line.isText))
+    }
+    // pitch is re-derived: how evenly the lines now sit is exactly what is scored
+    var diffs: [Double] = []
+    for group in out.blocks {
+        let rows = stableSorted(group) { out.lines[$0].baseline }.map { out.lines[$0] }
+        diffs += zip(rows, rows.dropFirst())
+            .map { $1.baseline - $0.baseline }.filter { $0 > 0 }
+    }
+    out.pitch = diffs.isEmpty ? a.pitch : median(diffs)
+    return out
 }
 
 /// True if any measure got materially worse. Noise near zero does not count.

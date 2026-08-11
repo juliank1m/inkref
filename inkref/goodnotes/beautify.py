@@ -162,7 +162,11 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
         pr.words = len(analysis.words)
         roles = pr.semantic.roles if pr.semantic else None
         pr.before = layout.metrics(boxes, analysis, roles)
-        pr.after = layout.metrics(layout.moved(boxes, offsets), roles=roles)
+        # scored on the same lines, not a re-analysis of the result: otherwise structural
+        # churn on a dense page reads as a regression no correction caused, and the
+        # numbers shown disagree with the guard that accepted the plan
+        shifted = layout.moved(boxes, offsets)
+        pr.after = layout.metrics(shifted, layout.reproject(analysis, shifted), roles)
         pr.moved = sum(1 for dx, dy in offsets if dx or dy)
         pr.max_shift = max((max(abs(dx), abs(dy)) for dx, dy in offsets), default=0.0)
 
