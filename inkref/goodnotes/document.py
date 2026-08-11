@@ -26,10 +26,53 @@ def to_points(units):
     return units * POINTS_PER_UNIT
 
 
+PAGE_CREATED, PAPER_DEFINITION = 54, 2
+
+
+def read_papers(events_raw):
+    """-> (page_id -> paper_id, paper_id -> {attachment, size, name}).
+
+    A page does not name its background directly. The page-created event (type 54) carries
+    the paper's uuid in field 3, and a separate paper-definition event (type 2) subjected to
+    THAT uuid carries the template attachment, the page size and the template name. Two
+    hops, and missing either one leaves a document rendering on blank white.
+
+    The page-created event is subjected to an id one lower in its final hex digit than the
+    page id in `index.notes.pb` — `...DC2B` against `...DC2C`, on 3 of 3 pages of the one
+    real notebook measured. Rather than do arithmetic on a uuid, the key here is everything
+    but that last character, which is still unique per page. LIKELY, not confirmed: one
+    document is not a sample.
+    """
+    pages, papers = {}, {}
+    for msg in pb.read_stream(events_raw):
+        f = pb.fields(msg)
+        subject = f[1][0].decode() if 1 in f and isinstance(f[1], tuple) else None
+        if not subject:
+            continue
+        if PAGE_CREATED in f:
+            body = pb.fields(f[PAGE_CREATED][0])
+            ref = pb.fields(body[3][0]) if 3 in body else {}
+            if 1 in ref:
+                pages[subject[:-1]] = ref[1][0].decode()
+        elif PAPER_DEFINITION in f:
+            body = pb.fields(f[PAPER_DEFINITION][0])
+            size = pb.fields(body[8][0]) if 8 in body else {}
+            dims = [v for _, v in sorted(size.items()) if isinstance(v, float)]
+            papers[subject] = {
+                "attachment": body[4][0].decode() if 4 in body else None,
+                "name": body[9][0].decode() if 9 in body else None,
+                # stored in GoodNotes units like every other coordinate
+                "size": (dims[0] * POINTS_PER_UNIT, dims[1] * POINTS_PER_UNIT)
+                        if len(dims) >= 2 else None,
+            }
+    return pages, papers
+
+
 class Page:
     def __init__(self, page_id, path, messages):
         self.id = page_id
         self.path = path
+        self.paper = None          # {"attachment", "name", "size"}, filled in by Document
         # one ordered list so original interleaving is preserved on write
         self.entries = []          # StrokeRecord, or a raw (descriptor, item) tuple
         # content is strictly alternating (descriptor, item)
@@ -76,6 +119,11 @@ class Document:
             raw = arc.members.get(path, b"")
             msgs = list(pb.read_stream(raw)) if raw else []
             self.pages.append(Page(page_id, path, msgs))
+        raw_events = arc.members.get(archive.INDEX_EVENTS)
+        if raw_events:
+            page_paper, papers = read_papers(raw_events)
+            for p in self.pages:
+                p.paper = papers.get(page_paper.get(p.id[:-1]))
         self.versions = ids.VersionAllocator.seeded_from(
             [r.version for p in self.pages for r in p.records])
         self._order_cursor = {}
@@ -88,6 +136,12 @@ class Document:
     @property
     def schema(self):
         return self.archive.schema
+
+    def background(self, page):
+        """The page's template as PDF bytes, or None. One-page PDFs made by svg2pdf."""
+        if not page.paper or not page.paper.get("attachment"):
+            return None
+        return self.archive.attachment(page.paper["attachment"])
 
     def page(self, page_id):
         for p in self.pages:

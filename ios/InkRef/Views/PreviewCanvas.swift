@@ -29,12 +29,28 @@ struct PreviewCanvas: View {
     let roles: [Role]
     var showStructure = false
     var progress: Double = 0        // 0 = original, 1 = refactored
+    /// The page's own size and template. Cropping to the ink instead is what made a page
+    /// with a printed grid come out as bare strokes on white, at the wrong proportions.
+    var paperSize: CGSize? = nil
+    var background: Data? = nil
+    var zoomable = true
+
+    @State private var zoom: CGFloat = 1
+    @State private var committedZoom: CGFloat = 1
+    @State private var pan: CGSize = .zero
+    @State private var committedPan: CGSize = .zero
 
     var body: some View {
         let page = pageBox
         return GeometryReader { geo in
             let fit = PageFit(page: page, view: geo.size)
             ZStack {
+                // the real paper first, so ink sits on the grid the user drew it on
+                if let background {
+                    PDFPage(data: background)
+                } else {
+                    Color.white
+                }
                 InkLayer(ink: ink, fit: fit, progress: progress)
                 if let analysis, showStructure {
                     StructureLayer(analysis: analysis, roles: roles, fit: fit)
@@ -42,11 +58,47 @@ struct PreviewCanvas: View {
             }
         }
         .aspectRatio(page.width / max(page.height, 1), contentMode: .fit)
+        .scaleEffect(zoom)
+        .offset(pan)
+        .gesture(zoomable ? zoomGesture : nil)
+        .simultaneousGesture(zoomable && zoom > 1 ? panGesture : nil)
+        .onTapGesture(count: 2) { resetOrFill() }
+        .clipped()
+        .animation(.easeOut(duration: 0.18), value: zoom)
     }
 
-    /// Union of the before *and* after positions, so nothing clips mid-animation and the
-    /// frame never jumps between the two states.
+    // Handwriting is small; a fit-to-page view of a dense sheet is unreadable without this.
+    private var zoomGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { zoom = min(max(committedZoom * $0.magnification, 1), 12) }
+            .onEnded { _ in
+                committedZoom = zoom
+                if zoom == 1 { pan = .zero; committedPan = .zero }
+            }
+    }
+
+    private var panGesture: some Gesture {
+        DragGesture()
+            .onChanged { pan = CGSize(width: committedPan.width + $0.translation.width,
+                                      height: committedPan.height + $0.translation.height) }
+            .onEnded { _ in committedPan = pan }
+    }
+
+    private func resetOrFill() {
+        if zoom > 1 {
+            zoom = 1; committedZoom = 1; pan = .zero; committedPan = .zero
+        } else {
+            zoom = 3; committedZoom = 3
+        }
+    }
+
+    /// The real page when the document declares one, and only otherwise the ink's own
+    /// extent. The union of before *and* after positions keeps the frame from jumping
+    /// mid-animation.
     private var pageBox: InkBox {
+        if let paperSize, paperSize.width > 1, paperSize.height > 1 {
+            return InkBox(x0: 0, y0: 0, x1: paperSize.width, y1: paperSize.height)
+        }
         guard !strokes.isEmpty else { return InkBox(x0: 0, y0: 0, x1: 1, y1: 1) }
         let u = InkBox.union(strokes.map(\.box) + zip(strokes, offsets).map { $0.box.offset(by: $1) })
         let pad = 16 + 0.02 * max(u.width, u.height)
@@ -180,5 +232,32 @@ private struct StructureLayer: View {
             }
         }
         .allowsHitTesting(false)
+    }
+}
+
+
+/// The page template, drawn straight from its one-page PDF with CoreGraphics.
+///
+/// GoodNotes stores paper as a PDF attachment, so this is the actual grid or ruling the
+/// user wrote on rather than an approximation of it.
+private struct PDFPage: View {
+    let data: Data
+
+    var body: some View {
+        Canvas { context, size in
+            guard let provider = CGDataProvider(data: data as CFData),
+                  let doc = CGPDFDocument(provider),
+                  let page = doc.page(at: 1) else { return }
+            let box = page.getBoxRect(.mediaBox)
+            guard box.width > 0, box.height > 0 else { return }
+            context.withCGContext { cg in
+                cg.saveGState()
+                // PDF space is y-up from the bottom left; the canvas is y-down
+                cg.translateBy(x: 0, y: size.height)
+                cg.scaleBy(x: size.width / box.width, y: -size.height / box.height)
+                cg.drawPDFPage(page)
+                cg.restoreGState()
+            }
+        }
     }
 }

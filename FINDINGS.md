@@ -386,6 +386,27 @@ is the event type**.
 | 102 | page content (schema 24) |
 | 104, 105 | schema 25 only |
 
+### Page -> background: two hops
+
+A page does not name its background. The chain is:
+
+```
+page id  ->  page-created event (54), field 3  ->  paper uuid
+paper uuid  ->  paper-definition event (2) subjected to it
+                f4 = template attachment uuid   f8 = page size (units)   f9 = template name
+attachment uuid  ->  index.attachments.pb  ->  attachments/<uuid>, a one-page PDF
+```
+
+Missing either hop renders a document as bare strokes on white at the wrong proportions.
+
+**The page-created event is subjected to an id one lower in its final hex digit than the
+page id** in `index.notes.pb` — `...DC2B` against `...DC2C`, on 3 of 3 pages of the one
+real notebook measured. Keying on everything but that last character is still unique per
+page and avoids arithmetic on a uuid. LIKELY: one document is not a sample.
+
+Measured on a real 3-page notebook: pages carried 455.0 x 588.4 pt and 595.3 x 842.0 pt
+(A4) with different templates each, so page size is per page and not per document.
+
 **Type 102 carries no stroke state** — only page uuid, timestamp, a version uuid, clock and
 schema. This is why strokes can be replaced without regenerating the event log.
 

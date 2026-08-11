@@ -182,6 +182,22 @@ public enum PB {
         return found
     }
 
+    /// A float stored as fixed64 or fixed32, for the page-size pair in a paper definition.
+    public static func double(_ part: Part, in b: [UInt8]) -> Double? {
+        let bytes = Array(b[part.payload])
+        if part.wire == wire64, bytes.count == 8 {
+            var bits: UInt64 = 0
+            for (i, byte) in bytes.enumerated() { bits |= UInt64(byte) << (8 * UInt64(i)) }
+            return Double(bitPattern: bits)
+        }
+        if part.wire == wire32, bytes.count == 4 {
+            var bits: UInt32 = 0
+            for (i, byte) in bytes.enumerated() { bits |= UInt32(byte) << (8 * UInt32(i)) }
+            return Double(Float(bitPattern: bits))
+        }
+        return nil
+    }
+
     public static func has(_ field: Int, in b: [UInt8]) throws -> Bool {
         try split(b).contains { $0.number == field }
     }

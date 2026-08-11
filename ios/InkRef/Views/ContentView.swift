@@ -271,7 +271,8 @@ struct ContentView: View {
             PreviewCanvas(strokes: page.strokes, offsets: page.offsets,
                           analysis: page.analysis, roles: page.roles,
                           showStructure: vm.showStructure,
-                          progress: vm.showRefactored ? 1 : 0)
+                          progress: vm.showRefactored ? 1 : 0,
+                          paperSize: page.paperSize, background: page.background)
                 .padding(10)
                 // A document preview is a sheet of paper in either colour scheme; dark-mode
                 // black ink on a dark ground would be invisible.

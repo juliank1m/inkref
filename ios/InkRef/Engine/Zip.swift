@@ -32,6 +32,19 @@ public struct ZipArchive {
         index(of: name).map { entries[$0].data }
     }
 
+    /// uuid -> zip path, from index.attachments.pb. Page backgrounds live there.
+    public func attachment(_ uuid: String, index: [UInt8]?) -> [UInt8]? {
+        guard let index else { return nil }
+        for message in (try? PB.readStream(index)) ?? [] {
+            guard let idRaw = try? PB.lastBytes(1, in: message),
+                  let pathRaw = try? PB.lastBytes(2, in: message),
+                  let id = String(bytes: idRaw, encoding: .utf8),
+                  let path = String(bytes: pathRaw, encoding: .utf8), id == uuid else { continue }
+            return data(named: path)
+        }
+        return nil
+    }
+
     public mutating func replace(_ name: String, with data: [UInt8]) {
         if let i = index(of: name) { entries[i].data = data }
     }

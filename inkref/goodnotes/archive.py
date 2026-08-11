@@ -45,6 +45,15 @@ class Archive:
     def note_paths(self):
         return read_index(self.members[INDEX_NOTES])
 
+    def attachment_paths(self):
+        """uuid -> zip path. Page backgrounds are one-page PDFs stored here."""
+        raw = self.members.get(INDEX_ATTACHMENTS)
+        return dict(read_index(raw)) if raw else {}
+
+    def attachment(self, uuid):
+        path = self.attachment_paths().get(uuid)
+        return self.members.get(path) if path else None
+
     def write(self, out_path):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:

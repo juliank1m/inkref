@@ -13,6 +13,8 @@ struct PagePreview: Identifiable {
     let id: String
     var strokes: [StrokePath]
     var offsets: [Offset]
+    var paperSize: CGSize?              // the page's own size, when the document declares one
+    var background: Data?               // its template PDF
     var analysis: InkLayout.Analysis
     var roles: [Role]
     var strengthUsed: String?           // may be gentler than asked
@@ -45,6 +47,8 @@ struct PagePreview: Identifiable {
 /// reference to the document — once this exists the parser is out of the picture.
 private struct PageGeometry {
     let id: String
+    let paperSize: CGSize?
+    let background: Data?
     let strokes: [StrokePath]
     let analysis: InkLayout.Analysis
     let blocks: [BlockDescription]
@@ -179,7 +183,8 @@ final class RefactorViewModel {
     /// never learns how to draw.
     private func pageImage(_ strokes: [StrokePath]) -> Data? {
         let renderer = ImageRenderer(content:
-            PreviewCanvas(strokes: strokes, offsets: [], analysis: nil, roles: [])
+            PreviewCanvas(strokes: strokes, offsets: [], analysis: nil, roles: [],
+                          zoomable: false)
                 .frame(width: 900, height: 1200)
                 .background(.white))
         renderer.scale = 1
@@ -213,7 +218,9 @@ final class RefactorViewModel {
             let strokes = try page.drawableStrokes()
             guard strokes.count >= 2 else { continue }   // a page with a scribble has no layout
             let analysis = InkLayout.analyze(strokes.map(\.box))
-            out.append(PageGeometry(id: page.id, strokes: strokes, analysis: analysis,
+            out.append(PageGeometry(id: page.id, paperSize: page.paper?.size,
+                                    background: doc.background(for: page),
+                                    strokes: strokes, analysis: analysis,
                                     blocks: InkLayout.describe(analysis)))
         }
         return (doc.pages.count, out)
@@ -227,7 +234,8 @@ final class RefactorViewModel {
         let (offsets, used, declined) = InkLayout.verifiedPlan(
             page.analysis, boxes: boxes, strength: strength, roles: roles)
         return PagePreview(
-            id: page.id, strokes: page.strokes, offsets: offsets, analysis: page.analysis,
+            id: page.id, strokes: page.strokes, offsets: offsets,
+            paperSize: page.paperSize, background: page.background, analysis: page.analysis,
             roles: roles, strengthUsed: used?.name, declined: declined,
             before: InkLayout.metrics(boxes, analysis: page.analysis, roles: roles),
             // The "after" page is re-analysed rather than re-using the old structure: the

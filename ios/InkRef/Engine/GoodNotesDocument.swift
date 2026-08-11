@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// GoodNotes stores coordinates in **1/132 inch**, not points. `points = units * 6/11`.
@@ -30,6 +31,13 @@ public struct StrokePath: Sendable {
     public let red: Double, green: Double, blue: Double, alpha: Double
 }
 
+/// A page's paper: its real size in points and the template PDF drawn behind the ink.
+public struct Paper: Sendable {
+    public let size: CGSize?
+    public let name: String?
+    public let attachment: String?
+}
+
 public final class GNPage {
     enum Entry {
         case stroke(StrokeRecord)
@@ -37,6 +45,7 @@ public final class GNPage {
     }
 
     public let id: String
+    public internal(set) var paper: Paper?
     let memberPath: String
     var entries: [Entry]
     private var drawable: [Int] = []          // indices into `entries`, in drawable order
@@ -118,6 +127,7 @@ public final class GNPage {
 
 public final class GoodNotesDocument {
     static let indexNotes = "index.notes.pb"
+    static let indexEvents = "index.events.pb"
     static let schemaMember = "schema.pb"
 
     var archive: ZipArchive
@@ -138,6 +148,55 @@ public final class GoodNotesDocument {
             pages.append(try GNPage(id: id, memberPath: member, messages: messages))
         }
         guard !pages.isEmpty else { throw GNError.format("document has no pages") }
+
+        // A page does not name its background directly: the page-created event (54) holds a
+        // paper uuid, and a paper-definition event (2) subjected to THAT uuid holds the
+        // template attachment and the page size. The page-created event is subjected to an
+        // id one lower in its last hex digit than the page id, so the stable prefix is the
+        // key. LIKELY — measured on 3 of 3 pages of one real notebook.
+        if let events = archive.data(named: Self.indexEvents) {
+            var pageToPaper: [String: String] = [:]
+            var papers: [String: Paper] = [:]
+            for message in (try? PB.readStream(events)) ?? [] {
+                guard let subjectRaw = try? PB.lastBytes(1, in: message),
+                      let subject = String(bytes: subjectRaw, encoding: .utf8) else { continue }
+                if let body = try? PB.lastBytes(54, in: message) {
+                    if let ref = try? PB.lastBytes(3, in: body),
+                       let paperRaw = try? PB.lastBytes(1, in: ref),
+                       let paper = String(bytes: paperRaw, encoding: .utf8) {
+                        pageToPaper[String(subject.dropLast())] = paper
+                    }
+                } else if let body = try? PB.lastBytes(2, in: message) {
+                    let attachment = (try? PB.lastBytes(4, in: body))
+                        .flatMap { $0 }.flatMap { String(bytes: $0, encoding: .utf8) }
+                    let name = (try? PB.lastBytes(9, in: body))
+                        .flatMap { $0 }.flatMap { String(bytes: $0, encoding: .utf8) }
+                    var size: CGSize? = nil
+                    if let dims = try? PB.lastBytes(8, in: body) {
+                        let values = ((try? PB.split(dims)) ?? [])
+                            .filter { $0.wire == PB.wire64 || $0.wire == PB.wire32 }
+                        if values.count >= 2, let w = PB.double(values[0], in: dims),
+                           let h = PB.double(values[1], in: dims) {
+                            size = CGSize(width: w * pointsPerUnit, height: h * pointsPerUnit)
+                        }
+                    }
+                    papers[subject] = Paper(size: size, name: name, attachment: attachment)
+                }
+            }
+            for page in pages {
+                if let key = pageToPaper[String(page.id.dropLast())] {
+                    page.paper = papers[key]
+                }
+            }
+        }
+    }
+
+    /// The page's template as PDF bytes. One-page PDFs, produced by svg2pdf.
+    public func background(for page: GNPage) -> Data? {
+        guard let uuid = page.paper?.attachment,
+              let bytes = archive.attachment(uuid,
+                  index: archive.data(named: "index.attachments.pb")) else { return nil }
+        return Data(bytes)
     }
 
     public static func open(_ url: URL) throws -> GoodNotesDocument {
