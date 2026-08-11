@@ -327,6 +327,13 @@ struct ContentView: View {
 
     private func pageCard(_ page: PagePreview) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            // On device this is the only place the stage timings can be read, and a
+            // screenshot has to be able to carry them off the iPad.
+            if !vm.timings.isEmpty, page.id == vm.pages.first?.id {
+                Text(vm.timings.summary)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
             Text(page.caption)
                 .font(.footnote)
                 .foregroundStyle(.secondary)

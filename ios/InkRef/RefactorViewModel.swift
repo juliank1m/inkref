@@ -1,6 +1,34 @@
 import SwiftUI
 import UIKit
 
+/// Wall-clock for each stage, so a device run reports its own numbers instead of being
+/// timed by someone with a stopwatch. Shown in the UI on purpose: the iPad is where the
+/// only measurements that matter are taken, and a screenshot has to be able to carry them.
+struct Timings: Equatable {
+    var importing = Duration.zero      // copy in + parse + geometry
+    var recognition = Duration.zero    // render tiles + Vision, all pages
+    var classification = Duration.zero // Backboard, if it ran at all
+    var formatting = Duration.zero     // plan + gate + line spacing
+    var export = Duration.zero         // apply + serialise + write
+
+    var isEmpty: Bool {
+        importing == .zero && recognition == .zero && formatting == .zero
+    }
+
+    /// One line, short enough to read off a screenshot.
+    var summary: String {
+        func ms(_ d: Duration) -> String {
+            let s = Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+            return s >= 1 ? String(format: "%.1fs", s) : String(format: "%.0fms", s * 1000)
+        }
+        var parts = ["import \(ms(importing))", "read \(ms(recognition))"]
+        if classification > .zero { parts.append("classify \(ms(classification))") }
+        parts.append("format \(ms(formatting))")
+        if export > .zero { parts.append("export \(ms(export))") }
+        return parts.joined(separator: " · ")
+    }
+}
+
 enum Status: Equatable {
     case idle, loading, analyzing, ready
     case failed(String)
@@ -114,6 +142,7 @@ final class RefactorViewModel {
     /// of an audience, is the same thing as a hang.
     var progress: String?
     var progressFraction: Double?
+    var timings = Timings()
     var pages: [PagePreview] = []
     var exportURL: URL?
     private(set) var isExporting = false
@@ -126,9 +155,12 @@ final class RefactorViewModel {
     func load(_ url: URL) async {
         reset()
         status = .loading
+        let clock = ContinuousClock()
+        let started = clock.now
         do {
             let copy = try await Self.copyIn(url)
             let scan = try await Self.scan(copy)
+            timings.importing = clock.now - started
             guard !scan.pages.isEmpty else { throw RefactorError.noInk }
             sourceCopy = copy
             geometry = scan.pages
@@ -165,6 +197,10 @@ final class RefactorViewModel {
         let analyzer = makeAnalyzer(aiMode)
         let requested = strength      // one run, one strength, even if the picker moves
         let reading = readPage      // one run, one setting
+        let clock = ContinuousClock()
+        timings.recognition = .zero
+        timings.classification = .zero
+        timings.formatting = .zero
         var built: [PagePreview] = []
         for (n, page) in geometry.enumerated() {
             progressFraction = Double(n) / Double(geometry.count)
@@ -172,7 +208,9 @@ final class RefactorViewModel {
                                            : "Reading page \(n + 1) of \(geometry.count)…"
             // Reading the page comes first: it decides where the lines and words are, and
             // every role, block description and metric below is about *those* lines.
+            let readAt = clock.now
             let read = reading ? await Self.read(page) : PageReading()
+            timings.recognition += clock.now - readAt
             let analysis = read.analysis ?? page.analysis
             var roles = [Role](repeating: .paragraph, count: analysis.lines.count)
             var groups: [[Int]] = []
@@ -183,18 +221,22 @@ final class RefactorViewModel {
                 // it — rendering one per page for the heuristic is pure waste.
                 let image = useVision && analyzer is BackboardAnalyzer
                     ? pageImage(page.strokes) : nil
+                let classifyAt = clock.now
                 let result = await analyzer.analyze(
                     InkLayout.describe(analysis, texts: Self.lineTexts(analysis, read.groups)),
                     image: image)
+                timings.classification += clock.now - classifyAt
                 if result.roles.count == roles.count { roles = result.roles }
                 source = result.source
                 groups = result.groups
             }
             progress = geometry.count == 1 ? "Working out the layout…"
                                            : "Laying out page \(n + 1) of \(geometry.count)…"
+            let formatAt = clock.now
             built.append(await Self.finish(page, analysis: analysis, read: read,
                                            strength: requested, roles: roles,
                                            groups: groups, source: source))
+            timings.formatting += clock.now - formatAt
             // Shown as each page lands, so a multi-page document is visibly progressing
             // rather than silently accumulating.
             pages = built
@@ -225,14 +267,18 @@ final class RefactorViewModel {
         // GoodNotes imports by filename, so this is the name the user will see in their
         // library. Keeping the original title first makes it sort next to the source.
         let name = (documentName ?? "Notes") + " (InkRef).goodnotes"
+        let clock = ContinuousClock()
+        let started = clock.now
         do {
             exportURL = try await Self.write(source: source, pages: pages, named: name)
+            timings.export = clock.now - started
         } catch {
             status = .failed(Self.message(error))
         }
     }
 
     func reset() {
+        timings = Timings()
         progress = nil
         progressFraction = nil
         documentName = nil
