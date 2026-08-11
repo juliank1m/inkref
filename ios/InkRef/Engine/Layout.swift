@@ -428,7 +428,12 @@ public enum InkLayout {
         var claimed = Set<Int>()
         var merged: [Line] = []
         for g in groups {
-            let idx = g.filter { $0 >= 0 && $0 < a.lines.count }
+            // `claimed` above is built from the raw ids, so de-duplicating here cannot drop
+            // a line from the page — it only stops one being merged into itself, which
+            // would otherwise put its strokes in the merged line twice and translate them
+            // by double whatever the gate approved.
+            var seen = Set<Int>()
+            let idx = g.filter { $0 >= 0 && $0 < a.lines.count && seen.insert($0).inserted }
             guard idx.count >= 2 else { continue }
             claimed.formUnion(idx)
             let rows = idx.map { a.lines[$0] }

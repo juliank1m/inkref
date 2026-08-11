@@ -109,6 +109,11 @@ final class RefactorViewModel {
     var showRecognition = false
     var showRefactored = false
     var status: Status = .idle
+    /// What the long run is doing right now. Reading a dense page takes several seconds and
+    /// a bare spinner for half a minute is indistinguishable from a hang — which, in front
+    /// of an audience, is the same thing as a hang.
+    var progress: String?
+    var progressFraction: Double?
     var pages: [PagePreview] = []
     var exportURL: URL?
     private(set) var isExporting = false
@@ -161,7 +166,10 @@ final class RefactorViewModel {
         let requested = strength      // one run, one strength, even if the picker moves
         let reading = readPage      // one run, one setting
         var built: [PagePreview] = []
-        for page in geometry {
+        for (n, page) in geometry.enumerated() {
+            progressFraction = Double(n) / Double(geometry.count)
+            progress = geometry.count == 1 ? "Reading the page…"
+                                           : "Reading page \(n + 1) of \(geometry.count)…"
             // Reading the page comes first: it decides where the lines and words are, and
             // every role, block description and metric below is about *those* lines.
             let read = reading ? await Self.read(page) : PageReading()
@@ -182,12 +190,18 @@ final class RefactorViewModel {
                 source = result.source
                 groups = result.groups
             }
+            progress = geometry.count == 1 ? "Working out the layout…"
+                                           : "Laying out page \(n + 1) of \(geometry.count)…"
             built.append(await Self.finish(page, analysis: analysis, read: read,
                                            strength: requested, roles: roles,
                                            groups: groups, source: source))
+            // Shown as each page lands, so a multi-page document is visibly progressing
+            // rather than silently accumulating.
+            pages = built
         }
 
-        pages = built
+        progress = nil
+        progressFraction = nil
         status = .ready
         // The picker moved while this run was in flight, so the layout on screen is not the
         // strength the control claims. Redo it rather than leave the two disagreeing.
@@ -203,9 +217,14 @@ final class RefactorViewModel {
     /// the same stroke twice.
     func export() async {
         guard let source = sourceCopy, !pages.isEmpty, !isExporting else { return }
+        // Exporting twice in a demo is normal; writing it twice is not, and the second
+        // write would translate every stroke a second time if it reused the same copy.
+        if exportURL != nil { return }
         isExporting = true
         defer { isExporting = false }
-        let name = (documentName ?? "Notes") + " refactored.goodnotes"
+        // GoodNotes imports by filename, so this is the name the user will see in their
+        // library. Keeping the original title first makes it sort next to the source.
+        let name = (documentName ?? "Notes") + " (InkRef).goodnotes"
         do {
             exportURL = try await Self.write(source: source, pages: pages, named: name)
         } catch {
@@ -214,6 +233,8 @@ final class RefactorViewModel {
     }
 
     func reset() {
+        progress = nil
+        progressFraction = nil
         documentName = nil
         pageCount = 0
         pages = []
@@ -280,8 +301,14 @@ final class RefactorViewModel {
         let boxes = page.strokes.map(\.box)
         let recognizer = VisionRecognizer()
         var lines: [RecognizedLine] = []
+        // The *cheap* per-stroke estimate, deliberately, and not `analysis.refH`. The
+        // tile size that was measured to work (86-90% of strokes grouped, against 37% for
+        // a single image) was calibrated against this number, and it is also the only one
+        // available before recognition has happened. Using the refined writing height here
+        // made tiles twice as big and cost the Swift engine nineteen points of coverage
+        // against Python on the same page.
         for (image, transform) in PageRender.tiles(page.strokes, paper: page.paperSize,
-                                                   refH: page.analysis.refH) {
+                                                   refH: refHeight(boxes)) {
             lines += (try? recognizer.recognize(image, in: transform)) ?? []
         }
         guard !lines.isEmpty else { return PageReading() }
@@ -318,8 +345,19 @@ final class RefactorViewModel {
         let boxes = page.strokes.map(\.box)
         // what the model grouped becomes one rigid line, so the plan cannot reach inside
         // an equation to re-space it
-        let analysis = groups.isEmpty ? read : InkLayout.mergeGroups(read, groups)
-        let planRoles = groups.isEmpty ? roles : nil
+        // Merging renumbers the lines, so the roles are carried across by stroke. Dropping
+        // them instead — which this used to do — unfreezes every equation and diagram on the
+        // page the moment the model returns any group at all.
+        var analysis = read
+        var planRoles: [Role]? = roles
+        if !groups.isEmpty {
+            var was = [Int: Role]()
+            for (k, line) in read.lines.enumerated() where k < roles.count {
+                for i in line.indices { was[i] = roles[k] }
+            }
+            analysis = InkLayout.mergeGroups(read, groups)
+            planRoles = analysis.lines.map { was[$0.indices.first ?? -1] ?? .paragraph }
+        }
         // verifiedPlan, not plan: a plan measured to make the page worse is eased and then
         // dropped, so a page can come back unchanged but never degraded.
         let (planned, used, declined) = InkLayout.verifiedPlan(

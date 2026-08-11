@@ -6,9 +6,10 @@ import UniformTypeIdentifiers
 /// offsets and roles.
 @MainActor
 struct ContentView: View {
-    @State private var vm = RefactorViewModel()
+    @Bindable var vm: RefactorViewModel
     @State private var importing = false
     @State private var sharing = false
+    @State private var showingSettings = false
     @AppStorage("BACKBOARD_API_KEY") private var apiKey = ""
 
     /// GoodNotes' UTI is imported by the app (see Info.plist), but the picker must still
@@ -42,6 +43,19 @@ struct ContentView: View {
         .sheet(isPresented: $sharing) {
             if let url = vm.exportURL { ShareSheet(items: [url]) }
         }
+        .sheet(isPresented: $showingSettings) {
+            NavigationStack {
+                ScrollView { aiSection.padding() }
+                    .navigationTitle("Options")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showingSettings = false }
+                        }
+                    }
+            }
+            .presentationDetents([.medium, .large])
+        }
         .alert("Couldn't do that", isPresented: failed) {
             Button("OK") { vm.status = .idle }
         } message: {
@@ -59,6 +73,13 @@ struct ContentView: View {
                 // synthetic taps on the simulator are not reliable enough to drive it.
                 if args.contains("-before") { vm.showRefactored = false }
                 if args.contains("-structure") { vm.showStructure = true }
+                // Drives the write path from the command line. The share sheet cannot be
+                // automated, and the export is the one step whose output has to be audited
+                // by something other than the code that produced it.
+                if args.contains("-autoExport") {
+                    await vm.export()
+                    print("EXPORTED \(vm.exportURL?.path ?? "nil")")
+                }
             }
             #endif
         }
@@ -87,7 +108,11 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
-                Button("or try a sample page") { Task { await vm.loadSample() } }
+                Text("…or share a notebook to InkRef from GoodNotes")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Button("try a sample page") { Task { await vm.loadSample() } }
                     .font(.callout)
 
                 if let name = vm.documentName {
@@ -112,7 +137,10 @@ struct ContentView: View {
                 .disabled(vm.documentName == nil || vm.status == .analyzing)
 
                 busy
-                aiSection
+
+                Button("Options") { showingSettings = true }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 24)
@@ -195,9 +223,25 @@ struct ContentView: View {
 
     @ViewBuilder private var busy: some View {
         switch vm.status {
-        case .loading: ProgressView("Opening document…")
-        case .analyzing: ProgressView("Reading the handwriting…")
-        default: EmptyView()
+        case .loading:
+            ProgressView("Opening document…")
+        case .analyzing:
+            // Determinate where we can be. Reading a dense page takes seconds, and a bar
+            // that visibly advances is the difference between "working" and "hung".
+            VStack(spacing: 8) {
+                if let f = vm.progressFraction {
+                    ProgressView(value: f).frame(maxWidth: 320)
+                } else {
+                    ProgressView()
+                }
+                Text(vm.progress ?? "Reading the handwriting…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.opacity)
+            }
+            .animation(.default, value: vm.progress)
+        default:
+            EmptyView()
         }
     }
 
@@ -272,13 +316,13 @@ struct ContentView: View {
                 sharing = vm.exportURL != nil
             }
         } label: {
-            Label(vm.isExporting ? "Exporting…" : "Export / Open in GoodNotes",
+            Label(vm.isExporting ? "Applying…" : "Apply & open in GoodNotes",
                   systemImage: "square.and.arrow.up")
                 .font(.headline)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(vm.isExporting)
+        .disabled(vm.isExporting || vm.status == .analyzing)
     }
 
     private func pageCard(_ page: PagePreview) -> some View {
@@ -352,5 +396,5 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(vm: RefactorViewModel())
 }

@@ -82,7 +82,10 @@ def parse_groups(payload, valid_ids, min_confidence=0.55):
         ids = [str(i) for i in entry.get("lines", entry.get("regions", []))
                if isinstance(i, (str, int))]
         unknown = [i for i in ids if i not in valid]
-        ids = [i for i in ids if i in valid and i not in seen]
+        # dict.fromkeys, not a set: order is the reading order, and a repeated id would
+        # put the same strokes in a merged line twice, so every offset applied to it lands
+        # twice — a line translated to double what the gate approved.
+        ids = list(dict.fromkeys(i for i in ids if i in valid and i not in seen))
         if unknown:
             warnings.append(f"group named unknown line(s) {unknown[:3]}")
         if conf < min_confidence:

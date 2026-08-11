@@ -13,6 +13,7 @@ without ever being converted.
 """
 import os
 from dataclasses import dataclass, field
+from math import isfinite
 
 from ..ink import collide
 from ..ink import flow
@@ -120,8 +121,8 @@ def page_strokes(page):
         sig, members = rec.geometry
         box = strokes_mod.bounds(sig, members)
         d, width = strokes_mod.svg_path(sig, members)
-        if box is None or not d:
-            continue
+        if box is None or not d or not all(map(isfinite, box)):
+            continue        # non-finite geometry poisons every measurement downstream
         # width stays raw here. A minimum-visible-width floor belongs to whoever is
         # drawing, not to the data — and applying it in units rather than points is what
         # made the Swift and Python digests disagree on one stroke.
@@ -215,8 +216,11 @@ def read_page(page, reader, scale=RENDER_SCALE):
     _, boxes = page_boxes(page)
     if reader is None or not boxes:
         return [], [], list(range(len(boxes)))
-    # Only to size the tiles. A rough writing height is all that is needed for that, and
-    # taking it from geometry costs nothing since the caller has usually measured it.
+    # Only to size the tiles, and deliberately the cheap per-stroke estimate rather than
+    # the refined writing height: it is the number LINES_PER_TILE was calibrated against,
+    # and the refined one does not exist yet — it comes out of the recognition this is
+    # about to perform. The Swift engine used the refined value once and lost nineteen
+    # points of coverage on the same page.
     ref_h = layout._ref_height(boxes)
     lines = []
     try:
@@ -343,8 +347,14 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
         if pr.semantic and pr.semantic.groups:
             # what the model grouped becomes one rigid line, so the plan below cannot
             # reach inside an equation to re-space it
+            was = {i: roles[k] for k, line in enumerate(analysis.lines)
+                   for i in line.indices if roles and k < len(roles)}
             analysis = layout.merge_groups(analysis, pr.semantic.groups)
-            roles = None
+            # Merging renumbers the lines, so the roles are carried across by stroke.
+            # Dropping them instead — which this used to do — unfreezes every equation and
+            # diagram on the page the moment the model returns any group at all.
+            roles = [was.get(line.indices[0], layout.PARAGRAPH) if line.indices
+                     else layout.PARAGRAPH for line in analysis.lines]
         offsets, used, hurt = layout.verified_plan(analysis, boxes, s, roles,
                                                    skip=plan_skip(pr))
         # Last gate before anything moves: the planner reasons about the ink it grouped,

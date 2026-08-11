@@ -24,6 +24,9 @@ This is the representation Stage 8 (line spacing) needs before it can be switche
 It is used now for the corrections that *are* enabled, which is what keeps it honest — an
 unused safety net is not a safety net.
 """
+from math import isfinite
+from statistics import median
+
 from . import layout
 
 # How far a move may be reduced before it is abandoned. A move worth a quarter of its
@@ -54,13 +57,21 @@ class InkMap:
         self.boxes = [tuple(map(float, b)) for b in boxes]
         self.ref_h = max(float(ref_h), 1e-6)
         self.page = page                      # (width, height) in points, or None
-        self.cell = max(2.0 * self.ref_h, 1e-6)
+        # Tied to the ink as well as to the writing height: one long stroke on a page whose
+        # ref_h is tiny would otherwise be indexed into millions of cells.
+        span = max((max(b[2] - b[0], b[3] - b[1]) for b in self.boxes
+                    if all(map(isfinite, b))), default=0.0)
+        self.cell = max(2.0 * self.ref_h, span / 64.0, 1e-6)
         self.grid = {}
         for i, b in enumerate(self.boxes):
             for key in self._cells(b):
                 self.grid.setdefault(key, []).append(i)
 
     def _cells(self, box):
+        # Non-finite geometry would ask for a range from -inf to +inf. It should never get
+        # this far (see beautify.page_strokes) but this is the loop that would hang.
+        if not all(map(isfinite, box)):
+            return
         x0, y0, x1, y1 = box
         for cx in range(int(x0 // self.cell), int(x1 // self.cell) + 1):
             for cy in range(int(y0 // self.cell), int(y1 // self.cell) + 1):
@@ -90,11 +101,24 @@ def _gap(a, b):
     return (dx * dx + dy * dy) ** 0.5
 
 
-def _line_dy(line, offsets):
-    """The line's own vertical shift: the median of its strokes', so one stray word does
-    not speak for the line."""
-    dys = sorted(offsets[i][1] for i in line.indices if i < len(offsets))
-    return dys[len(dys) // 2] if dys else 0.0
+def _line_dy(line, boxes, offsets):
+    """How far the line's baseline actually moved.
+
+    Not the median of its strokes' *offsets*. The gate scales word groups independently, so
+    a line can be left torn — three words moved and one held back — and the median then
+    reports the moved words' shift as the whole line's. A line that really travelled half
+    as far reads as ordered while it is sitting on top of the line below it. Fuzzing found
+    15 such inversions in 5000 runs, the worst two writing heights deep.
+    """
+    idx = [i for i in line.indices if i < len(offsets) and i < len(boxes)]
+    if not idx:
+        return 0.0
+    # `statistics.median`, which averages the two middle values, and not the upper one: a
+    # line torn exactly in half — two words moved, two held back — has no middle element,
+    # and taking the upper reports the moved half as the whole line and hides the tear
+    # again. This is the same median the rest of the engine measures baselines with.
+    return (median(boxes[i][3] + offsets[i][1] for i in idx)
+            - median(boxes[i][3] for i in idx))
 
 
 def _shift(box, dx, dy):
@@ -269,13 +293,13 @@ def _uncross(a, boxes, offsets, groups=None):
         for group in (a.blocks or []):
             rows = sorted(group, key=lambda k: a.lines[k].baseline)
             for p, q in zip(rows, rows[1:]):
-                top = a.lines[p].baseline + _line_dy(a.lines[p], out)
-                bot = a.lines[q].baseline + _line_dy(a.lines[q], out)
+                top = a.lines[p].baseline + _line_dy(a.lines[p], boxes, out)
+                bot = a.lines[q].baseline + _line_dy(a.lines[q], boxes, out)
                 if bot >= top:
                     continue
                 crossed += 1
-                straying = p if abs(_line_dy(a.lines[p], out)) >= abs(
-                    _line_dy(a.lines[q], out)) else q
+                straying = p if abs(_line_dy(a.lines[p], boxes, out)) >= abs(
+                    _line_dy(a.lines[q], boxes, out)) else q
                 ease_dy([i for grp, k2 in (groups or [])
                          if k2 == straying for i in grp]
                         or a.lines[straying].indices)

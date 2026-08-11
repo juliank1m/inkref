@@ -79,11 +79,20 @@ public enum Collide {
              group, dx, dy, slackRatio * a.refH, page)
     }
 
-    /// The line's own vertical shift: the median of its strokes', so one stray word does
-    /// not speak for the line.
-    static func lineDy(_ line: InkLayout.Line, _ offsets: [Offset]) -> Double {
-        let dys = line.indices.filter { $0 < offsets.count }.map { offsets[$0].dy }.sorted()
-        return dys.isEmpty ? 0 : dys[dys.count / 2]
+    /// How far the line's baseline actually moved.
+    ///
+    /// Not the median of its strokes' *offsets*. The gate scales word groups
+    /// independently, so a line can be left torn — some words moved, some held back — and
+    /// the median of the offsets then reports the moved words' shift as the whole line's.
+    /// A line that really travelled half as far reads as ordered while it is sitting on top
+    /// of the line below it. Fuzzing found 16 such inversions in 5000 runs, the worst two
+    /// writing heights deep. `median` averages the two middle values, which matters here:
+    /// a line torn exactly in half has no middle element, and taking the upper one hides
+    /// the tear all over again.
+    static func lineDy(_ line: InkLayout.Line, _ boxes: [InkBox], _ offsets: [Offset]) -> Double {
+        let idx = line.indices.filter { $0 < offsets.count && $0 < boxes.count }
+        guard !idx.isEmpty else { return 0 }
+        return median(idx.map { boxes[$0].y1 + offsets[$0].dy }) - median(idx.map { boxes[$0].y1 })
     }
 
     /// Undo any reading-order inversion the gate created. Reduces only.
@@ -135,12 +144,12 @@ public enum Collide {
             for group in a.blocks {
                 let rows = group.sorted { a.lines[$0].baseline < a.lines[$1].baseline }
                 for (p, q) in zip(rows, rows.dropFirst()) {
-                    let top = a.lines[p].baseline + lineDy(a.lines[p], out)
-                    let bot = a.lines[q].baseline + lineDy(a.lines[q], out)
+                    let top = a.lines[p].baseline + lineDy(a.lines[p], boxes, out)
+                    let bot = a.lines[q].baseline + lineDy(a.lines[q], boxes, out)
                     if bot >= top { continue }
                     crossed += 1
-                    let straying = abs(lineDy(a.lines[p], out)) >= abs(lineDy(a.lines[q], out))
-                        ? p : q
+                    let straying = abs(lineDy(a.lines[p], boxes, out))
+                        >= abs(lineDy(a.lines[q], boxes, out)) ? p : q
                     let owned = groups.filter { $0.1 == straying }.flatMap(\.0)
                     easeDy(owned.isEmpty ? a.lines[straying].indices : owned)
                 }
@@ -166,7 +175,11 @@ public enum Collide {
         public init(_ boxes: [InkBox], refH: Double) {
             self.boxes = boxes
             self.refH = Swift.max(refH, 1e-6)
-            self.cell = Swift.max(2 * Swift.max(refH, 1e-6), 1e-6)
+            // Tied to the ink as well as to the writing height: one long stroke on a page
+            // whose refH is tiny would otherwise be indexed into millions of cells.
+            let span = boxes.filter { $0.x0.isFinite && $0.y1.isFinite }
+                .map { Swift.max($0.width, $0.height) }.max() ?? 0
+            self.cell = Swift.max(2 * Swift.max(refH, 1e-6), span / 64, 1e-6)
             for (i, b) in boxes.enumerated() {
                 for key in Self.cells(b, cell) { grid[key, default: []].append(i) }
             }
@@ -174,6 +187,9 @@ public enum Collide {
 
         static func cells(_ b: InkBox, _ cell: Double) -> [Cell] {
             var out: [Cell] = []
+            // Non-finite geometry would ask for a range from -inf to +inf. It should never
+            // get this far, but this is the loop that would hang.
+            guard b.x0.isFinite, b.y0.isFinite, b.x1.isFinite, b.y1.isFinite else { return out }
             let cx0 = Int((b.x0 / cell).rounded(.down)), cx1 = Int((b.x1 / cell).rounded(.down))
             let cy0 = Int((b.y0 / cell).rounded(.down)), cy1 = Int((b.y1 / cell).rounded(.down))
             guard cx0 <= cx1, cy0 <= cy1 else { return out }

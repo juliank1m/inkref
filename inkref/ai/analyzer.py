@@ -55,8 +55,27 @@ Rules:
 """
 
 
-# Classification is billed per token, so the payload is kept small on purpose.
+# Classification is billed per token, so one request is kept small on purpose. A page with
+# more lines than this is split by column rather than refused (see `_batches`).
 MAX_BLOCKS = int(os.environ.get("INKREF_MAX_BLOCKS", "120"))
+
+
+def _batches(blocks, limit):
+    """-> [[block]] small enough to send, or None if no split gets under `limit`.
+
+    Split on the column each line belongs to, which `layout.describe` already knows because
+    the layout engine had to separate columns to measure pitch at all. A column is a
+    coherent run of reading order, so a classifier sees a sensible document rather than an
+    arbitrary slice — and the alternative, cutting every 120 lines, would put a heading in
+    one request and the paragraph it introduces in another.
+    """
+    if len(blocks) <= limit:
+        return [blocks]
+    by_column = {}
+    for b in blocks:
+        by_column.setdefault(b.get("column", 0), []).append(b)
+    out = [by_column[k] for k in sorted(by_column)]
+    return None if any(len(g) > limit for g in out) else out
 
 # Keys the classifier actually reasons from. `bbox` is four floats per line and the model
 # is explicitly not asked where anything goes, so shipping full precision geometry is
@@ -157,16 +176,45 @@ class BackboardAnalyzer:
             base.warnings.append("BACKBOARD_API_KEY not set; used geometry heuristics")
             return base
 
-        # A page is billed per token, so an oversized page is refused rather than sent.
-        # A dense four-column sheet detects ~360 lines; that payload plus an image is a
-        # large request that mostly buys labels for lines the layout engine will decline
-        # to move anyway. Geometry alone is the better trade there.
-        if len(blocks) > MAX_BLOCKS:
+        # A dense multi-column sheet detects ~300 lines, which used to be refused outright
+        # for exceeding the per-request budget — so on exactly the pages a classifier would
+        # help most, it never ran. Send one request per column instead. The columns are
+        # already known (the layout engine separates them to measure pitch), each is a
+        # coherent run of reading order, and each comfortably fits the budget.
+        batches = _batches(blocks, MAX_BLOCKS)
+        if batches is None:
             base.warnings.append(
-                f"{len(blocks)} lines exceeds the {MAX_BLOCKS}-line classification budget; "
-                f"used geometry heuristics (raise INKREF_MAX_BLOCKS to override)")
+                f"{len(blocks)} lines exceeds the {MAX_BLOCKS}-line budget even split by "
+                f"column; used geometry heuristics (raise INKREF_MAX_BLOCKS to override)")
             return base
+        if len(batches) > 1:
+            return self._batched(batches, base, image)
+        return self._one(blocks, base, image)
 
+    def _batched(self, batches, base, image):
+        """One request per column, merged. A column that fails leaves its own lines to the
+        heuristic and costs the others nothing."""
+        roles = list(base.roles)
+        order = {b["id"]: i for i, b in enumerate(sum(batches, []))}
+        blocks_out, groups, warnings, sources = [], [], [], set()
+        for n, batch in enumerate(batches):
+            # The image goes with the first request only. It is the same page every time,
+            # and paying for it once per column is paying four times for one picture.
+            part = self._one(batch, self.fallback.analyze(batch), image if n == 0 else None)
+            sources.add(part.source)
+            warnings += [f"column {n + 1}: {w}" for w in part.warnings]
+            blocks_out += part.blocks
+            for b, role in zip(batch, part.roles):
+                if b["id"] in order:
+                    roles[order[b["id"]]] = role
+            groups += [[order[batch[i]["id"]] for i in g if i < len(batch)]
+                       for g in part.groups]
+        return SemanticResult(roles=roles, groups=[g for g in groups if len(g) > 1],
+                              blocks=blocks_out,
+                              source=self.name if self.name in sources else "heuristic",
+                              warnings=warnings)
+
+    def _one(self, blocks, base, image=None):
         prompt = PROMPT.format(
             blocks=json.dumps(_compact(blocks), separators=(",", ":")),
             schema=schemas.JSON_SCHEMA_HINT,

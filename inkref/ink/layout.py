@@ -769,7 +769,9 @@ def merge_groups(a, groups):
     claimed = {k for g in groups for k in g if 0 <= k < len(a.lines)}
     merged = []
     for g in groups:
-        idx = [k for k in g if 0 <= k < len(a.lines)]
+        # `claimed` above is built from the raw ids, so de-duplicating here cannot drop a
+        # line from the page — it only stops one being merged into itself.
+        idx = list(dict.fromkeys(k for k in g if 0 <= k < len(a.lines)))
         if len(idx) < 2:
             continue
         rows = [a.lines[k] for k in idx]
@@ -882,6 +884,9 @@ def describe(a, texts=None):
             "looks_like_text": line.is_text,
             "nearby": [f"L{j}" for j in (k - 1, k + 1) if 0 <= j < len(a.lines)],
             "text": (texts[k] if texts and k < len(texts) else ""),
+            # Not for the model — it is stripped before sending. It is what lets a page too
+            # big for one request be split into requests that are each a whole column.
+            "column": line.block,
         })
     return out
 
