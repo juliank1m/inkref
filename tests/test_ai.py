@@ -57,8 +57,15 @@ class FakeOpener:
 
 
 def envelope(text):
-    """What the Backboard endpoint wraps a model's reply in."""
-    return json.dumps({"status": "COMPLETED", "message": text}).encode()
+    """What the Backboard endpoint really wraps a model's reply in.
+
+    Copied from an observed live response: `message` is a fixed envelope status and the
+    reply is in `content`. A stub that put the reply in `message` would have kept passing
+    while the real integration returned nothing usable.
+    """
+    return json.dumps({"status": "COMPLETED",
+                       "message": "Message added successfully",
+                       "content": text}).encode()
 
 
 def blocks_reply(*entries, wrap=envelope):
@@ -72,6 +79,30 @@ def analyzer_for(reply, key=KEY):
     opener = FakeOpener(reply)
     client = BackboardClient(Config(api_key=key), opener=opener)
     return BackboardAnalyzer(client=client), opener
+
+
+def test_reply_comes_from_content_not_message():
+    """Regression, found against the live API.
+
+    On a successful run Backboard puts the envelope status "Message added successfully" in
+    `message` and the model's actual reply in `content`. Reading `message` first parses that
+    status as the answer, JSON extraction fails, and every call degrades to the heuristics —
+    the AI layer looks wired up and does nothing.
+    """
+    canned = json.dumps({
+        "status": "COMPLETED",
+        "message": "Message added successfully",
+        "content": '{"blocks": [{"id": "L0", "type": "heading", "confidence": 0.9}]}',
+    }).encode()
+    client = BackboardClient(Config(api_key="k"), opener=FakeOpener(canned))
+    assert client.ask("hi") == \
+        '{"blocks": [{"id": "L0", "type": "heading", "confidence": 0.9}]}', \
+        "ask() returned the envelope status instead of the model reply"
+
+    result = BackboardAnalyzer(client=client).analyze(BLOCKS)
+    assert result.source == "backboard", f"fell back to {result.source}"
+    assert result.roles[0] == layout.HEADING, result.roles
+    print("  reply field: content wins over the message envelope")
 
 
 def test_well_formed_reply_sets_every_role():
@@ -157,8 +188,35 @@ def test_transport_failures_fall_back_to_the_heuristic():
         assert result.roles == FLOOR, (label, result.roles)
         assert result.warnings[-1] == "fell back to geometry heuristics", \
             (label, result.warnings)
-        assert len(opener.requests) == analyzer.attempts, (label, len(opener.requests))
-    print(f"  failure: {', '.join(cases)} each degrade to geometry, none raise")
+        # Exactly one request, never a retry. These failures cost money and cannot be
+        # fixed by asking again: a timeout has most likely already run and been billed
+        # server-side, and a bad gateway or a rejected model fails identically the second
+        # time. Only a malformed reply earns a retry (see the check below).
+        assert len(opener.requests) == 1, \
+            (label, f"{len(opener.requests)} requests — a transport failure was retried")
+    print(f"  failure: {', '.join(cases)} each degrade to geometry in one call, none raise")
+
+
+def test_only_malformed_output_is_retried():
+    """A second attempt is spent only where it can plausibly help."""
+    analyzer, opener = analyzer_for(envelope("this is prose, not JSON at all"))
+    result = analyzer.analyze(BLOCKS)
+    assert result.source == "heuristic", result.source
+    assert len(opener.requests) == analyzer.attempts, \
+        f"a malformed reply should be retried, got {len(opener.requests)} call(s)"
+    print(f"  retry: malformed output retried {analyzer.attempts}x, transport errors once")
+
+
+def test_an_oversized_page_is_not_sent_at_all():
+    """Classification is billed per token; a page past the budget never leaves."""
+    from inkref.ai import analyzer as an
+    big = [dict(BLOCKS[i % len(BLOCKS)], id=f"L{i}") for i in range(an.MAX_BLOCKS + 1)]
+    analyzer, opener = analyzer_for(envelope('{"blocks": []}'))
+    result = analyzer.analyze(big)
+    assert opener.requests == [], "an oversized page was still sent to the API"
+    assert result.source == "heuristic", result.source
+    assert "exceeds" in " ".join(result.warnings), result.warnings
+    print(f"  budget: {an.MAX_BLOCKS + 1} lines refused without a call, geometry used")
 
 
 def test_auto_without_a_key_is_the_heuristic():
@@ -192,7 +250,10 @@ def test_the_key_travels_in_a_header_not_the_url():
 
 
 if __name__ == "__main__":
-    for fn in [test_well_formed_reply_sets_every_role,
+    for fn in [test_only_malformed_output_is_retried,
+               test_an_oversized_page_is_not_sent_at_all,
+               test_reply_comes_from_content_not_message,
+               test_well_formed_reply_sets_every_role,
                test_fenced_json_still_parses,
                test_prose_before_the_json_still_parses,
                test_invented_block_id_is_dropped,

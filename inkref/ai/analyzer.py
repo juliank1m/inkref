@@ -11,6 +11,7 @@ down, timeout, non-JSON reply, invented block ids, unknown block types, low conf
 The formatter must keep working when the model does not, so `analyze` never raises.
 """
 import json
+import os
 from dataclasses import dataclass, field
 
 from ..ink import layout
@@ -38,6 +39,30 @@ Rules:
 - `confidence` is your own 0-1 estimate
 - `text` is optional and is metadata only; it is never used to redraw anything
 """
+
+
+# Classification is billed per token, so the payload is kept small on purpose.
+MAX_BLOCKS = int(os.environ.get("INKREF_MAX_BLOCKS", "120"))
+
+# Keys the classifier actually reasons from. `bbox` is four floats per line and the model
+# is explicitly not asked where anything goes, so shipping full precision geometry is
+# paying for tokens that change no answer.
+_KEEP = ("id", "words", "strokes", "height_ratio", "indent_level", "gap_above",
+         "starts_with_mark", "looks_like_text")
+
+
+def _compact(blocks):
+    """Drop keys the prompt does not use and round what is left."""
+    out = []
+    for b in blocks:
+        row = {}
+        for k in _KEEP:
+            v = b.get(k)
+            if v is None:
+                continue
+            row[k] = round(v, 2) if isinstance(v, float) else v
+        out.append(row)
+    return out
 
 
 @dataclass
@@ -85,9 +110,11 @@ def _type_for(role):
 class BackboardAnalyzer:
     """Vision classification through Backboard, with the heuristic as the floor.
 
-    One retry: a model that answers with prose or a fenced block usually complies when
-    told so plainly. After that the heuristic result is returned — a slightly worse
-    layout is always better than a failed one.
+    Calls cost money, so the request is kept small and is made at most twice, and only
+    when a second attempt could plausibly succeed: a malformed reply is worth asking
+    again for, a timeout or an unsupported model is not. Oversized pages are refused
+    outright rather than sent. Whatever happens, the heuristic result is what comes back
+    — a slightly worse layout beats a failed one.
     """
 
     name = "backboard"
@@ -109,8 +136,18 @@ class BackboardAnalyzer:
             base.warnings.append("BACKBOARD_API_KEY not set; used geometry heuristics")
             return base
 
+        # A page is billed per token, so an oversized page is refused rather than sent.
+        # A dense four-column sheet detects ~360 lines; that payload plus an image is a
+        # large request that mostly buys labels for lines the layout engine will decline
+        # to move anyway. Geometry alone is the better trade there.
+        if len(blocks) > MAX_BLOCKS:
+            base.warnings.append(
+                f"{len(blocks)} lines exceeds the {MAX_BLOCKS}-line classification budget; "
+                f"used geometry heuristics (raise INKREF_MAX_BLOCKS to override)")
+            return base
+
         prompt = PROMPT.format(
-            blocks=json.dumps(blocks, indent=1),
+            blocks=json.dumps(_compact(blocks), separators=(",", ":")),
             schema=schemas.JSON_SCHEMA_HINT,
             types=", ".join(schemas.BLOCK_TYPES))
         ids = [b["id"] for b in blocks]
@@ -122,7 +159,15 @@ class BackboardAnalyzer:
                     prompt if attempt == 0 else prompt + "\nReturn raw JSON only.",
                     system=SYSTEM, image=image)
                 found, notes = schemas.parse_blocks(reply, ids)
-            except (BackboardError, schemas.InvalidModelOutput) as e:
+            except BackboardError as e:
+                # Do NOT retry a transport or configuration failure. A timeout has most
+                # likely already run and been billed server-side, and an unsupported model
+                # or a bad key fails identically the second time — retrying just doubles
+                # the cost of a request that cannot succeed. Only malformed output, below,
+                # is worth asking again for.
+                warnings.append(str(e))
+                break
+            except schemas.InvalidModelOutput as e:
                 warnings.append(f"attempt {attempt + 1}: {e}")
                 continue
             if not found:

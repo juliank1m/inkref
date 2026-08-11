@@ -138,7 +138,7 @@ ever read from a file in this repo.
 | `BACKBOARD_API_KEY` | — | absent means the AI layer is simply off |
 | `BACKBOARD_BASE_URL` | `https://app.backboard.io/api` | |
 | `BACKBOARD_PROVIDER` | `anthropic` | |
-| `BACKBOARD_MODEL` | `claude-sonnet-4-20250514` | |
+| `BACKBOARD_MODEL` | `claude-haiku-4-5-20251001` | |
 | `BACKBOARD_TIMEOUT` | `30` | seconds |
 
 `--ai off` must always work, and does. See [ARCHITECTURE.md](ARCHITECTURE.md) for what is

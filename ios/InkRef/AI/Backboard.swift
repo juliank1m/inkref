@@ -22,7 +22,7 @@ public struct BackboardConfig: Sendable {
 
     public static let defaultBaseURL = URL(string: "https://app.backboard.io/api")!
     public static let defaultProvider = "anthropic"
-    public static let defaultModel = "claude-sonnet-4-20250514"
+    public static let defaultModel = "claude-haiku-4-5-20251001"
     public static let defaultTimeout: TimeInterval = 30
 
     public init(apiKey: String = "", baseURL: URL = BackboardConfig.defaultBaseURL,
@@ -156,11 +156,20 @@ public final class BackboardClient: Sendable {
             throw BackboardError.badBody("a non-JSON body")
         }
         if let status = payload["status"] as? String, status.uppercased() == "FAILED" {
-            throw BackboardError.badBody("a FAILED run")
+            // The reason lives in `content` — "Model 'x' is not supported", a quota
+            // message, and so on. Reporting a bare FAILED turns a one-line configuration
+            // fix into a debugging session, and the fallback hides it from the user.
+            let reason = (payload["content"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw BackboardError.badBody(
+                reason.isEmpty ? "a FAILED run" : "a FAILED run: \(reason.prefix(200))")
         }
-        // `message or content`: an *empty* message still has to fall through to content,
-        // which is where the reply lands on the multipart path.
-        let text = [payload["message"], payload["content"]]
+        // `content` first, NOT `message`. Measured against the live API: on a successful
+        // run `message` is the envelope status "Message added successfully" and `content`
+        // carries the model's reply. Reading `message` first parses that status string as
+        // the answer, JSON extraction fails, and every call silently degrades to the
+        // heuristics — the AI layer looks wired up and does nothing.
+        let text = [payload["content"], payload["message"]]
             .compactMap { $0 as? String }
             .first { !$0.isEmpty }
         guard let text else { throw BackboardError.badBody("no message text") }

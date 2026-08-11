@@ -18,7 +18,7 @@ Configuration is environment only. Nothing here is read from a file in the repo:
     BACKBOARD_API_KEY     required; absent means the AI layer is simply off
     BACKBOARD_BASE_URL    default https://app.backboard.io/api
     BACKBOARD_PROVIDER    default anthropic
-    BACKBOARD_MODEL       default claude-sonnet-4-20250514
+    BACKBOARD_MODEL       default claude-haiku-4-5-20251001  (any name from GET /models)
     BACKBOARD_TIMEOUT     seconds, default 30
 """
 import json
@@ -30,7 +30,10 @@ from dataclasses import dataclass
 
 DEFAULT_BASE_URL = "https://app.backboard.io/api"
 DEFAULT_PROVIDER = "anthropic"
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+# Backboard's own docs still show claude-sonnet-4-20250514, which their API rejects as
+# unsupported. Taken from a live GET /models instead. Any name in that catalog works via
+# BACKBOARD_MODEL.
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_TIMEOUT = 30.0
 
 
@@ -174,8 +177,19 @@ class BackboardClient:
         if not isinstance(payload, dict):
             raise BackboardError("Backboard returned an unexpected body")
         if str(payload.get("status", "")).upper() == "FAILED":
-            raise BackboardError("Backboard reported the run as FAILED")
-        text = payload.get("message") or payload.get("content")
+            # The reason lives in `content` — "Model 'x' is not supported", a quota
+            # message, and so on. Reporting a bare FAILED turns a one-line configuration
+            # fix into a debugging session, and the fallback hides it from the user.
+            reason = str(payload.get("content") or "").strip()
+            raise BackboardError(
+                f"Backboard run FAILED: {reason[:200]}" if reason
+                else "Backboard reported the run as FAILED")
+        # `content` first, NOT `message`. Measured against the live API: on a successful
+        # run `message` is the envelope status "Message added successfully" and `content`
+        # carries the model's reply. Reading `message` first parses that status string as
+        # the answer, JSON extraction fails, and every call silently falls back to the
+        # heuristics — the AI layer looks wired up and does nothing.
+        text = payload.get("content") or payload.get("message")
         if not text:
             raise BackboardError("Backboard returned no message text")
         return text
