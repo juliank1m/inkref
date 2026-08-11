@@ -126,6 +126,10 @@ func recognitionDigest(_ path: String) throws {
     print("  unmatched \(unmatched.map(String.init).joined(separator: ","))")
 
     let a = StrokeMapper.analysis(groups, boxes: boxes)
+    // Roles cycle so that equation/diagram (frozen) and unknown (unnamed) both appear;
+    // without them the collision gate below never exercises its protected-ink branch.
+    let roleCycle: [Role] = [.paragraph, .heading, .equation, .unknown, .bullet, .diagram]
+    let roles = (0..<a.lines.count).map { roleCycle[$0 % roleCycle.count] }
     print(String(format: "analysis lines=%d refH=%.4f pitch=%.4f blocks=%d wordGap=%.4f",
                  a.lines.count, a.refH, a.pitch, a.blocks.count, a.wordGap))
     for (k, line) in a.lines.enumerated() {
@@ -133,8 +137,11 @@ func recognitionDigest(_ path: String) throws {
                      k, line.baseline, line.level, line.block, line.rigid ? 1 : 0,
                      line.words.count))
     }
-    for (k, o) in InkLayout.plan(a, strength: .balanced, skip: ["line"]).enumerated()
-    where !o.isZero {
+    let planned = InkLayout.plan(a, strength: .balanced, roles: roles, skip: ["line"])
+    let (constrained, gate) = Collide.constrain(a, boxes: boxes, offsets: planned,
+                                                roles: roles, page: nil)
+    print("gate groups=\(gate.groups) reduced=\(gate.reduced) cancelled=\(gate.cancelled)")
+    for (k, o) in constrained.enumerated() where !o.isZero {
         print(String(format: "  offset %d %.4f %.4f", k, o.dx, o.dy))
     }
 }

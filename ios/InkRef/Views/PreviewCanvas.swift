@@ -14,6 +14,9 @@ extension Role {
         case .bullet: return .purple
         case .equation, .diagram: return .red
         case .paragraph: return .cyan
+        // Unnamed regions are drawn grey on purpose: "nothing claimed this" should not
+        // look like a classification.
+        case .annotation, .unknown: return .gray
         }
     }
 }

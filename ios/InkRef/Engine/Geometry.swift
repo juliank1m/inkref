@@ -37,10 +37,18 @@ public struct Offset: Equatable, Sendable {
 /// deterministic rule applies. The AI layer may set it; geometry can guess it.
 public enum Role: String, Sendable, CaseIterable {
     case paragraph, heading, bullet, equation, diagram
+    /// What a classifier says when it could not tell, or was not believed. Distinct from
+    /// `paragraph`: prose is a positive answer, these are the absence of one.
+    case annotation, unknown
 
     /// Ink that is never moved. Aligning a formula or a sketch to a text baseline would
     /// wreck it, and "leave it alone" is always a safe answer.
     public var isFrozen: Bool { self == .equation || self == .diagram }
+
+    /// No *semantic* treatment — no heading whitespace, no bullet alignment — but still
+    /// eligible for the ordinary within-line cleanup, which is deadbanded, capped and
+    /// thrown away by `verifiedPlan` if it measures worse.
+    public var isUnnamed: Bool { self == .annotation || self == .unknown }
 }
 
 /// Numbers that should go DOWN when a page gets cleaner. All in points.
@@ -83,14 +91,15 @@ public struct BlockDescription: Codable, Sendable {
     public var startsWithMark: Bool    // a lone bullet/dash before the text
     public var looksLikeText: Bool     // false = a drawing row, which is never moved
     public var nearby: [String]
+    public var text: String           // what the recogniser read, when the page was read
 
     public init(id: String, bbox: [Double], words: Int, strokes: Int, heightRatio: Double,
                 indentLevel: Int, gapAbove: Double?, startsWithMark: Bool,
-                looksLikeText: Bool = true, nearby: [String]) {
+                looksLikeText: Bool = true, nearby: [String], text: String = "") {
         self.id = id; self.bbox = bbox; self.words = words; self.strokes = strokes
         self.heightRatio = heightRatio; self.indentLevel = indentLevel
         self.gapAbove = gapAbove; self.startsWithMark = startsWithMark
-        self.looksLikeText = looksLikeText; self.nearby = nearby
+        self.looksLikeText = looksLikeText; self.nearby = nearby; self.text = text
     }
 }
 

@@ -17,17 +17,28 @@ import Foundation
 public enum BlockType: String, Codable, Sendable, CaseIterable {
     case heading, paragraph
     case bulletList = "bullet_list"
-    case equation, diagram, annotation, drawing, other
+    // A list and an item in it are the same thing at line granularity, which is the only
+    // granularity we classify at. Accept both names rather than argue with the model.
+    case bulletItem = "bullet_item"
+    case equation, diagram, annotation, unknown
+    // tolerated synonyms — liberal in what we accept, strict in what we act on
+    case drawing, other
 
-    /// What that means to the layout engine. Anything not obviously structural maps to
-    /// prose, the conservative default: prose gets the ordinary alignment everyone gets.
+    /// What that means to the layout engine.
+    ///
+    /// `unknown` is the floor, not `paragraph`. A model that saw the page and could not
+    /// name a region has told us something, and answering "prose" on its behalf would
+    /// license the full prose treatment on a guess we invented. An unnamed region still
+    /// gets the ordinary within-line cleanup (see `Role.isUnnamed`) — just no semantic rule.
     public var role: Role {
         switch self {
         case .heading: return .heading
-        case .bulletList: return .bullet
+        case .bulletList, .bulletItem: return .bullet
         case .equation: return .equation
         case .diagram, .drawing: return .diagram
-        case .paragraph, .annotation, .other: return .paragraph
+        case .paragraph: return .paragraph
+        case .annotation: return .annotation
+        case .unknown, .other: return .unknown
         }
     }
 
@@ -38,6 +49,8 @@ public enum BlockType: String, Codable, Sendable, CaseIterable {
         case .equation: self = .equation
         case .diagram: self = .diagram
         case .paragraph: self = .paragraph
+        case .annotation: self = .annotation
+        case .unknown: self = .unknown
         }
     }
 }
@@ -152,12 +165,28 @@ public struct BackboardAnalyzer: SemanticAnalyzer {
                 warnings.append("attempt \(attempt + 1): nothing survived validation")
                 continue
             }
-            // Start from the heuristic and let validated labels override it, so a model
-            // that only classifies half the page still helps with that half.
-            var roles = base.roles
+            // A region the model named gets that name. A region it did not is `unknown`,
+            // not prose — the model saw the page, and answering on its behalf would
+            // license the full prose treatment on a guess we invented. The exception is a
+            // region the geometry heuristic made a positive claim about (a bullet mark, an
+            // oversized first line): that claim stands on its own evidence and survives.
             let byID = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            for (i, b) in blocks.enumerated() where i < roles.count {
-                if let hit = byID[b.id] { roles[i] = hit.role }
+            let claimed = Set(base.blocks.map(\.id))
+            var roles: [Role] = []
+            var unnamed = 0
+            for (i, b) in blocks.enumerated() {
+                if let hit = byID[b.id] {
+                    roles.append(hit.role)
+                } else if claimed.contains(b.id), i < base.roles.count {
+                    roles.append(base.roles[i])
+                } else {
+                    roles.append(.unknown)
+                    unnamed += 1
+                }
+            }
+            if unnamed > 0 {
+                warnings.append("\(unnamed) of \(blocks.count) regions unnamed by the "
+                                + "model; left unclassified")
             }
             return SemanticResult(roles: roles, blocks: found, source: name,
                                   warnings: warnings + notes)
@@ -188,11 +217,10 @@ public struct BackboardAnalyzer: SemanticAnalyzer {
 
             Reply with JSON matching exactly this shape and nothing else:
             {
-              "blocks": [
+              "regions": [
                 {"id": "<one of the given ids>",
-                 "type": "\(types.replacingOccurrences(of: ", ", with: "|"))",
-                 "confidence": 0.0-1.0,
-                 "text": "<approximate transcription, optional, metadata only>"}
+                 "role": "\(types.replacingOccurrences(of: ", ", with: "|"))",
+                 "confidence": 0.0-1.0}
               ]
             }
 
@@ -277,8 +305,11 @@ public enum ModelOutput {
                                    minConfidence: Double = minConfidence)
         throws -> ([SemanticBlock], [String]) {
         guard let payload = try extractJSON(text) as? [String: Any],
-              let raws = payload["blocks"] as? [Any] else {
-            throw Invalid("expected an object with a 'blocks' array")
+              // `regions`/`role` is the shape we ask for; `blocks`/`type` is accepted
+              // too, because tolerating it costs one lookup and turns a whole retry —
+              // a second billed call — into a non-event.
+              let raws = (payload["regions"] as? [Any]) ?? (payload["blocks"] as? [Any]) else {
+            throw Invalid("expected an object with a 'regions' array")
         }
 
         let valid = Set(validIDs)
@@ -297,22 +328,23 @@ public enum ModelOutput {
                 warnings.append("dropped duplicate block id '\(id)'")
                 continue
             }
-            let name = (string(entry["type"]) ?? "other")
+            let name = (string(entry["role"]) ?? string(entry["type"]) ?? "unknown")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
                 .replacingOccurrences(of: " ", with: "_")
-            var type = BlockType.other
+            var type = BlockType.unknown
             if let known = BlockType(rawValue: name) {
                 type = known
             } else {
-                warnings.append("\(id): unknown type '\(name)', treated as prose")
+                warnings.append("\(id): unrecognised role '\(name)', left unclassified")
             }
             let confidence = min(max((entry["confidence"] as? NSNumber)?.doubleValue
                 ?? Double(string(entry["confidence"]) ?? "") ?? 0, 0), 1)
-            guard confidence >= minConfidence else {
-                warnings.append(String(format: "%@: %@ at %.2f below threshold, left as prose",
-                                       id, type.rawValue, confidence))
-                continue
+            if confidence < minConfidence {
+                warnings.append(String(format:
+                    "%@: %@ at %.2f below threshold, left unclassified",
+                    id, type.rawValue, confidence))
+                type = .unknown
             }
             seen.insert(id)
             blocks.append(SemanticBlock(id: id, type: type, confidence: confidence,

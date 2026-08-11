@@ -495,7 +495,11 @@ public enum InkLayout {
         return ([Offset](repeating: Offset(), count: a.boxCount), nil, hurt)
     }
 
-    public static func describe(_ a: Analysis) -> [BlockDescription] {
+    /// `texts` is one string per line, in `a.lines` order. It is the whole reason a
+    /// classifier can tell a heading from a first line of prose: geometry sees two similar
+    /// boxes, and "Limits of Multivariable Functions" against "For a function of two
+    /// variables" is not a close call. Metadata — nothing is ever redrawn from it.
+    public static func describe(_ a: Analysis, texts: [String]? = nil) -> [BlockDescription] {
         a.lines.enumerated().map { k, line in
             BlockDescription(
                 id: "L\(k)",
@@ -508,7 +512,8 @@ public enum InkLayout {
                     : round((line.baseline - a.lines[k - 1].baseline) / a.pitch, 2),
                 startsWithMark: line.words.count >= 2 && isMark(line.words[0], a.refH),
                 looksLikeText: line.isText,
-                nearby: [k - 1, k + 1].filter { $0 >= 0 && $0 < a.lines.count }.map { "L\($0)" })
+                nearby: [k - 1, k + 1].filter { $0 >= 0 && $0 < a.lines.count }.map { "L\($0)" },
+                text: texts.flatMap { k < $0.count ? $0[k] : nil } ?? "")
         }
     }
 

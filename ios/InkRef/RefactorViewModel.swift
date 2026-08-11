@@ -26,6 +26,7 @@ struct PagePreview: Identifiable {
     var recognized: [RecognizedLine] = []   // for the debug overlay
     var groups: [WordGroup] = []
     var unmatched: [Int] = []           // strokes no group claimed; deliberately untouched
+    var constrained = Collide.Report()  // moves the collision gate reduced or cancelled
 
     var improvement: LayoutMetrics { after.improvement(over: before) }
     var moved: Int { offsets.filter { !$0.isZero }.count }
@@ -41,6 +42,11 @@ struct PagePreview: Identifiable {
             // The share is the honest headline: the rest of the page was left untouched
             // on purpose, and saying so is the difference between "safe" and "broken".
             parts.append(String(format: "read %.0f%% of the ink", share * 100))
+        }
+        // A move the page had no room for is a decision, not a rounding error; showing it
+        // is the difference between "nothing happened" and "nothing could safely happen".
+        if constrained.touched > 0 {
+            parts.append("\(constrained.touched) moves held back to clear other ink")
         }
         parts.append(named.isEmpty ? "structure via \(source)"
                                    : "\(source): " + named.joined(separator: ", "))
@@ -163,7 +169,9 @@ final class RefactorViewModel {
                 // it — rendering one per page for the heuristic is pure waste.
                 let image = useVision && analyzer is BackboardAnalyzer
                     ? pageImage(page.strokes) : nil
-                let result = await analyzer.analyze(InkLayout.describe(analysis), image: image)
+                let result = await analyzer.analyze(
+                    InkLayout.describe(analysis, texts: Self.lineTexts(analysis, read.groups)),
+                    image: image)
                 if result.roles.count == roles.count { roles = result.roles }
                 source = result.source
                 groups = result.groups
@@ -278,6 +286,23 @@ final class RefactorViewModel {
                            analysis: StrokeMapper.analysis(groups, boxes: boxes))
     }
 
+    /// What each line says, from the words mapped onto it. Rough transcription is fine —
+    /// it is read by a classifier, never redrawn.
+    private nonisolated static func lineTexts(_ a: InkLayout.Analysis,
+                                              _ groups: [WordGroup]) -> [String]? {
+        guard !groups.isEmpty else { return nil }
+        var owner = [Int: String]()
+        for g in groups { for i in g.indices { owner[i] = g.text } }
+        return a.lines.map { line in
+            // ordered de-duplication: a line's words must stay in the order they were written
+            var seen = Set<String>(), words: [String] = []
+            for i in line.indices {
+                if let t = owner[i], !t.isEmpty, seen.insert(t).inserted { words.append(t) }
+            }
+            return words.joined(separator: " ")
+        }
+    }
+
     private nonisolated static func finish(_ page: PageGeometry,
                                            analysis read: InkLayout.Analysis,
                                            read reading: PageReading,
@@ -291,9 +316,14 @@ final class RefactorViewModel {
         let planRoles = groups.isEmpty ? roles : nil
         // verifiedPlan, not plan: a plan measured to make the page worse is eased and then
         // dropped, so a page can come back unchanged but never degraded.
-        let (offsets, used, declined) = InkLayout.verifiedPlan(
+        let (planned, used, declined) = InkLayout.verifiedPlan(
             analysis, boxes: boxes, strength: strength, roles: planRoles,
             skip: reading.analysis == nil ? [] : ["line"])
+        // Last gate before anything moves: the planner reasons about the ink it grouped,
+        // the page also holds ink nobody grouped, and only this sees both.
+        let (offsets, gate) = Collide.constrain(
+            analysis, boxes: boxes, offsets: planned, roles: planRoles,
+            page: PageRender.pageSize(paper: page.paperSize, boxes: boxes))
         return PagePreview(
             id: page.id, strokes: page.strokes, offsets: offsets,
             paperSize: page.paperSize, background: page.background, analysis: read,
@@ -310,7 +340,8 @@ final class RefactorViewModel {
             }(),
             source: source,
             structure: reading.analysis == nil ? "geometry" : "ocr",
-            recognized: reading.lines, groups: reading.groups, unmatched: reading.unmatched)
+            recognized: reading.lines, groups: reading.groups, unmatched: reading.unmatched,
+            constrained: gate)
     }
 
     private nonisolated static func write(source: URL, pages: [PagePreview],

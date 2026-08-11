@@ -14,6 +14,7 @@ without ever being converted.
 import os
 from dataclasses import dataclass, field
 
+from ..ink import collide
 from ..ink import grouping
 from ..ink import layout
 from ..ink import recognize
@@ -44,6 +45,7 @@ class PageReport:
     recognized: list = field(default_factory=list)   # RecognizedLine, for the debug overlay
     groups: list = field(default_factory=list)       # WordGroup
     unmatched: list = field(default_factory=list)    # stroke indices no group claimed
+    constrained: dict = field(default_factory=dict)  # moves the collision gate reduced
 
     @property
     def improvement(self):
@@ -225,12 +227,33 @@ def read_page(page, reader, scale=RENDER_SCALE):
     return lines, groups, unmatched
 
 
-def classify(page, analysis, analyzer, vision=False):
+def line_texts(analysis, groups):
+    """What each line of `analysis` says, from the words mapped onto it. -> [str].
+
+    This is what lets a classifier do its job at all. Geometry sees two boxes of similar
+    size and cannot tell a section heading from the first line of the paragraph under it;
+    "Limits of Multivariable Functions" against "For a function of two variables" is not a
+    close call. Rough transcription is fine — it is read, never redrawn.
+    """
+    owner = {}
+    for g in groups:
+        for i in g.indices:
+            owner[i] = g.text
+    out = []
+    for line in analysis.lines:
+        # dict.fromkeys, not set: a line's words must stay in the order they were written
+        words = dict.fromkeys(t for t in (owner.get(i) for i in line.indices) if t)
+        out.append(" ".join(words).strip())
+    return out
+
+
+def classify(page, analysis, analyzer, vision=False, groups=()):
     """Run the optional semantic layer over one page. Never raises."""
     if analyzer is None or not analysis.lines:
         return None
     image = page_image(page) if vision else None
-    return analyzer.analyze(layout.describe(analysis), image)
+    texts = line_texts(analysis, groups) if groups else None
+    return analyzer.analyze(layout.describe(analysis, texts), image)
 
 
 def fair_page(page, iterations=2):
@@ -310,7 +333,7 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
         if analysis is None:
             pr.unmatched = []
             analysis = layout.analyze(boxes)
-        pr.semantic = classify(page, analysis, analyzer, vision)
+        pr.semantic = classify(page, analysis, analyzer, vision, pr.groups)
         roles = pr.semantic.roles if pr.semantic else None
         if pr.semantic and pr.semantic.groups:
             # what the model grouped becomes one rigid line, so the plan below cannot
@@ -319,6 +342,10 @@ def beautify_document(doc, strength="balanced", apply=True, analyzer=None, visio
             roles = None
         offsets, used, hurt = layout.verified_plan(analysis, boxes, s, roles,
                                                    skip=plan_skip(pr))
+        # Last gate before anything moves: the planner reasons about the ink it grouped,
+        # the page also holds ink nobody grouped, and only this sees both.
+        offsets, pr.constrained = collide.constrain(
+            analysis, boxes, offsets, roles, page=page_size(page, boxes))
         pr.strength_used = used.name if used else None
         pr.declined = hurt
         pr.analysis = analysis

@@ -81,10 +81,21 @@ COLUMN_MIN_SHARE = 0.10     # both sides of a cut must hold this share of the st
 # the numbers below, and the transform itself, stay ours.
 PARAGRAPH, HEADING, BULLET, EQUATION, DIAGRAM = (
     "paragraph", "heading", "bullet", "equation", "diagram")
+# What a classifier says when it could not tell, or was not believed. Distinct from
+# `paragraph`: prose is a positive answer, this is the absence of one.
+ANNOTATION, UNKNOWN = "annotation", "unknown"
 
 # Roles whose ink is never moved. Aligning a formula or a sketch to a text baseline would
 # wreck it, and "leave it alone" is always a safe answer.
 FROZEN_ROLES = frozenset({EQUATION, DIAGRAM})
+
+# Roles that get no *semantic* treatment — no heading whitespace, no bullet alignment —
+# but are still eligible for the ordinary within-line cleanup. That cleanup is deadbanded,
+# capped, and thrown away by `verified_plan` if it measures worse, which is the "existing
+# safe transformation with strong geometric justification" an unnamed region may have.
+# Freezing them outright would mean one unanswered region on an otherwise classified page
+# comes back untouched for no reason a reader could see.
+UNNAMED_ROLES = frozenset({ANNOTATION, UNKNOWN})
 
 
 @dataclass(frozen=True)
@@ -840,13 +851,19 @@ def beautify(boxes, s=BALANCED, roles=None):
     return a, verified_plan(a, boxes, s, roles)[0]
 
 
-def describe(a):
-    """The page as a classifier sees it: one record per detected line, geometry only.
+def describe(a, texts=None):
+    """The page as a classifier sees it: one record per detected line.
 
-    This is the entire payload a model is given about structure — ids, boxes and a few
-    ratios. It is deliberately not asked where anything should go (SPEC: the model decides
-    *what*, this engine decides *where*), and every id it may answer with appears here, so
-    an answer naming anything else is provably invented and gets dropped.
+    This is the entire payload a model is given about structure — ids, boxes, a few ratios
+    and, when the page has been read, what each line says. It is deliberately not asked
+    where anything should go (SPEC: the model decides *what*, this engine decides *where*),
+    and every id it may answer with appears here, so an answer naming anything else is
+    provably invented and gets dropped.
+
+    `texts` is one string per line, in `a.lines` order. It is the whole reason a classifier
+    can tell a heading from a first line of prose: geometry sees two similar boxes, and
+    "Limits of Multivariable Functions" against "For a function of two variables" is not a
+    close call. The text is metadata — nothing is ever redrawn from it.
     """
     out = []
     for k, line in enumerate(a.lines):
@@ -864,6 +881,7 @@ def describe(a):
                                      and len(line.words) >= 2),
             "looks_like_text": line.is_text,
             "nearby": [f"L{j}" for j in (k - 1, k + 1) if 0 <= j < len(a.lines)],
+            "text": (texts[k] if texts and k < len(texts) else ""),
         })
     return out
 

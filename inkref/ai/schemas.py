@@ -13,34 +13,47 @@ from dataclasses import dataclass
 
 from ..ink import layout
 
-# What a model is allowed to say a region is.
-BLOCK_TYPES = ("heading", "paragraph", "bullet_list", "equation", "diagram",
-               "annotation", "drawing", "other")
+# What a model is allowed to say a region is. Deliberately small: every extra name is a
+# branch someone has to define a deterministic rule for, and an undefined role is worse
+# than no role at all.
+BLOCK_TYPES = ("heading", "paragraph", "bullet_list", "bullet_item", "equation",
+               "diagram", "annotation", "unknown")
 
-# ...and what that means to the layout engine. Anything unmapped is treated as prose,
-# which is the conservative default: prose gets the ordinary alignment everyone gets.
+# ...and what that means to the layout engine.
+#
+# `unknown` is the floor, not `paragraph`. A model that saw the page and could not name a
+# region has told us something, and answering "prose" on its behalf would license the full
+# prose treatment on the strength of a guess we made up. `unknown` still gets the ordinary
+# within-line cleanup (see layout.UNNAMED_ROLES) — it just gets no semantic rule.
 ROLE_FOR_TYPE = {
     "heading": layout.HEADING,
     "paragraph": layout.PARAGRAPH,
     "bullet_list": layout.BULLET,
+    # A list and an item in it are the same thing at line granularity, which is the only
+    # granularity we classify at. Accept both names rather than argue with the model.
+    "bullet_item": layout.BULLET,
     "equation": layout.EQUATION,
     "diagram": layout.DIAGRAM,
-    "annotation": layout.PARAGRAPH,
+    "annotation": layout.ANNOTATION,
+    "unknown": layout.UNKNOWN,
+    # tolerated synonyms — liberal in what we accept, strict in what we act on
     "drawing": layout.DIAGRAM,
-    "other": layout.PARAGRAPH,
+    "sketch": layout.DIAGRAM,
+    "formula": layout.EQUATION,
+    "title": layout.HEADING,
+    "other": layout.UNKNOWN,
 }
 
 MIN_CONFIDENCE = 0.55       # below this the deterministic default is the better bet
 
 JSON_SCHEMA_HINT = """{
-  "blocks": [
+  "regions": [
     {"id": "<one of the given ids>",
-     "type": "heading|paragraph|bullet_list|equation|diagram|annotation|drawing|other",
-     "confidence": 0.0-1.0,
-     "text": "<approximate transcription, optional, metadata only>"}
+     "role": "heading|paragraph|bullet_list|bullet_item|equation|diagram|annotation|unknown",
+     "confidence": 0.0-1.0}
   ],
   "groups": [
-    {"lines": ["<id>", "<id>"], "type": "equation|diagram", "confidence": 0.0-1.0}
+    {"lines": ["<id>", "<id>"], "role": "equation|diagram", "confidence": 0.0-1.0}
   ]
 }"""
 
@@ -66,7 +79,8 @@ def parse_groups(payload, valid_ids, min_confidence=0.55):
             conf = float(entry.get("confidence", 0.0))
         except (TypeError, ValueError):
             conf = 0.0
-        ids = [str(i) for i in entry.get("lines", []) if isinstance(i, (str, int))]
+        ids = [str(i) for i in entry.get("lines", entry.get("regions", []))
+               if isinstance(i, (str, int))]
         unknown = [i for i in ids if i not in valid]
         ids = [i for i in ids if i in valid and i not in seen]
         if unknown:
@@ -90,7 +104,7 @@ class Block:
 
     @property
     def role(self):
-        return ROLE_FOR_TYPE.get(self.type, layout.PARAGRAPH)
+        return ROLE_FOR_TYPE.get(self.type, layout.UNKNOWN)
 
 
 class InvalidModelOutput(ValueError):
@@ -130,15 +144,33 @@ def extract_json(text):
     raise InvalidModelOutput("unterminated JSON object")
 
 
+def _entries(payload):
+    """The classification list, under whichever name the model used.
+
+    `regions`/`role` is the shape we ask for. `blocks`/`type` is accepted too: it costs one
+    lookup and turns a whole retry — a second billed call — into a non-event.
+    """
+    for key in ("regions", "blocks"):
+        if isinstance(payload.get(key), list):
+            return payload[key]
+    return None
+
+
 def parse_blocks(text, valid_ids, min_confidence=MIN_CONFIDENCE):
-    """-> (blocks, warnings). Never raises on content — only on unusable structure."""
+    """-> (blocks, warnings). Never raises on content — only on unusable structure.
+
+    Anything that does not validate becomes `unknown` rather than disappearing: a region
+    the model named badly and a region it never mentioned are the same situation, and both
+    must be visibly unclassified rather than quietly treated as prose.
+    """
     payload = extract_json(text)
-    if not isinstance(payload, dict) or not isinstance(payload.get("blocks"), list):
-        raise InvalidModelOutput("expected an object with a 'blocks' array")
+    entries = _entries(payload) if isinstance(payload, dict) else None
+    if entries is None:
+        raise InvalidModelOutput("expected an object with a 'regions' array")
 
     valid = set(valid_ids)
     blocks, warnings, seen = [], [], set()
-    for raw in payload["blocks"]:
+    for raw in entries:
         if not isinstance(raw, dict):
             warnings.append("dropped a non-object entry")
             continue
@@ -149,18 +181,20 @@ def parse_blocks(text, valid_ids, min_confidence=MIN_CONFIDENCE):
         if bid in seen:
             warnings.append(f"dropped duplicate block id {bid!r}")
             continue
-        btype = str(raw.get("type", "other")).strip().lower().replace(" ", "_")
-        if btype not in BLOCK_TYPES:
-            warnings.append(f"{bid}: unknown type {btype!r}, treated as prose")
-            btype = "other"
+        named = raw.get("role", raw.get("type", "unknown"))
+        btype = str(named).strip().lower().replace(" ", "_")
+        if btype not in ROLE_FOR_TYPE:
+            warnings.append(f"{bid}: unrecognised role {btype!r}, left unclassified")
+            btype = "unknown"
         try:
             conf = float(raw.get("confidence", 0.0))
         except (TypeError, ValueError):
             conf = 0.0
         conf = min(max(conf, 0.0), 1.0)
         if conf < min_confidence:
-            warnings.append(f"{bid}: {btype} at {conf:.2f} below threshold, left as prose")
-            continue
+            warnings.append(f"{bid}: {btype} at {conf:.2f} below threshold, "
+                            "left unclassified")
+            btype = "unknown"
         text_meta = raw.get("text")
         seen.add(bid)
         blocks.append(Block(id=bid, type=btype, confidence=conf,

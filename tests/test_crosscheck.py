@@ -276,7 +276,7 @@ def test_engines_agree_on_recognition_mapping(binary):
     """
     import json
 
-    from inkref.ink import grouping, layout, recognize
+    from inkref.ink import collide, grouping, layout, recognize
     from inkref.ink.recognize import RecognizedLine, RecognizedWord
 
     data = recognition_fixture()
@@ -313,9 +313,18 @@ def test_engines_agree_on_recognition_mapping(binary):
             out.append("  L%02d base=%.4f level=%d block=%d rigid=%d words=%d"
                        % (k, line.baseline, line.level, line.block,
                           1 if line.rigid else 0, len(line.words)))
+        # Roles cycle so that equation/diagram (frozen) and unknown (unnamed) both appear;
+        # without them the collision gate below never exercises its protected-ink branch.
+        cycle = [layout.PARAGRAPH, layout.HEADING, layout.EQUATION, layout.UNKNOWN,
+                 layout.BULLET, layout.DIAGRAM]
+        roles = [cycle[k % len(cycle)] for k in range(len(a.lines))]
         # skip="line" is what beautify.plan_skip pins on any OCR-structured page; the
         # digest has to plan the same way the product does or it proves nothing.
-        for k, (dx, dy) in enumerate(layout.plan(a, layout.BALANCED, skip={"line"})):
+        planned = layout.plan(a, layout.BALANCED, roles, skip={"line"})
+        constrained, gate = collide.constrain(a, boxes, planned, roles, page=None)
+        out.append("gate groups=%d reduced=%d cancelled=%d"
+                   % (gate["groups"], gate["reduced"], gate["cancelled"]))
+        for k, (dx, dy) in enumerate(constrained):
             if dx or dy:
                 out.append("  offset %d %.4f %.4f" % (k, dx, dy))
         python = "\n".join(out) + "\n"
@@ -329,8 +338,7 @@ def test_engines_agree_on_recognition_mapping(binary):
             raise AssertionError(f"digests differ in length: {len(s)} vs {len(p)}")
         assert len(groups) > 20, f"fixture too thin to prove anything: {len(groups)}"
         assert unmatched, "fixture never exercises the leave-it-alone path"
-        offsets = layout.plan(a, layout.BALANCED)
-        assert all(offsets[i] == (0.0, 0.0) for i in unmatched), \
+        assert all(constrained[i] == (0.0, 0.0) for i in unmatched), \
             "a stroke no group claimed was moved"
         print(f"  recognition agrees: {len(merged)} lines, {len(groups)} groups, "
               f"{len(unmatched)} strokes left untouched, identical plans")

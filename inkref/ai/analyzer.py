@@ -19,31 +19,39 @@ from . import schemas
 from .backboard import BackboardClient, BackboardError
 
 SYSTEM = (
-    "You classify regions of a handwritten page. You are given the geometry of each "
-    "detected line and, when available, an image of the page. Reply with JSON only. "
-    "Never invent an id that was not given to you. Never suggest coordinates, layout or "
-    "corrections — another system owns those. If unsure, say 'other' with low confidence."
+    "You classify regions of a handwritten page that has ALREADY been located and read. "
+    "You are given each region's id, geometry and recognised text, and sometimes an image "
+    "of the page. Reply with JSON only. Never invent an id that was not given to you. "
+    "Never transcribe, re-read or re-segment the page, and never return coordinates, "
+    "positions, spacing or corrections — another system owns all of those and will discard "
+    "them. Your entire job is to name what each given region already is. If you cannot "
+    "tell, say 'unknown'; that is a useful answer, not a failure."
 )
 
-PROMPT = """Classify each line of this handwritten page.
+PROMPT = """Name what each region of this handwritten page is.
 
-Lines detected by our geometry engine (coordinates in points, y down, origin top-left):
+The regions below were found by our own recogniser and geometry engine. Their positions
+and extents are already settled — do not propose new ones, merge them, or suggest where
+anything should go. Coordinates are in points, y down, origin top-left.
+
 {blocks}
 
 Reply with JSON matching exactly this shape and nothing else:
 {schema}
 
-Also group lines that are ONE thing and must move together — an equation split across a
+Also group regions that are ONE thing and must move together — an equation split across a
 numerator, a fraction bar and a denominator; a limit and the expression beneath it; a
-diagram and its labels. Grouped lines are translated as a unit and never re-spaced
+diagram and its labels. Grouped regions are translated as a unit and never re-spaced
 internally, which is how exponents stay attached to their bases. Group only what you are
 sure about; leave ordinary prose ungrouped.
 
 Rules:
-- one entry per line id above, using those ids verbatim
-- `type` must be one of: {types}
+- one entry per region id above, using those ids verbatim
+- `role` must be one of: {types}
+- use `unknown` when you cannot tell; do not guess `paragraph` to fill a gap
 - `confidence` is your own 0-1 estimate
-- `text` is optional and is metadata only; it is never used to redraw anything
+- an `equation` or `diagram` is protected from all internal formatting, so use those two
+  whenever a region's internal spacing carries meaning
 """
 
 
@@ -53,8 +61,12 @@ MAX_BLOCKS = int(os.environ.get("INKREF_MAX_BLOCKS", "120"))
 # Keys the classifier actually reasons from. `bbox` is four floats per line and the model
 # is explicitly not asked where anything goes, so shipping full precision geometry is
 # paying for tokens that change no answer.
-_KEEP = ("id", "words", "strokes", "height_ratio", "indent_level", "gap_above",
+_KEEP = ("id", "text", "words", "strokes", "height_ratio", "indent_level", "gap_above",
          "starts_with_mark", "looks_like_text")
+
+# A recogniser's reading of handwriting is rough, and a long one is mostly tokens. Enough
+# to tell a heading from a sentence is all this has to be.
+MAX_TEXT = 60
 
 
 def _compact(blocks):
@@ -64,8 +76,10 @@ def _compact(blocks):
         row = {}
         for k in _KEEP:
             v = b.get(k)
-            if v is None:
+            if v is None or v == "":
                 continue
+            if k == "text":
+                v = str(v)[:MAX_TEXT]
             row[k] = round(v, 2) if isinstance(v, float) else v
         out.append(row)
     return out
@@ -184,13 +198,25 @@ class BackboardAnalyzer:
                 warnings.append(f"attempt {attempt + 1}: nothing survived validation")
                 continue
 
-            # Start from the heuristic and let validated labels override it, so a model
-            # that only classifies half the page still helps with that half.
-            roles = list(base.roles)
+            # A region the model named gets that name. A region it did not is `unknown`,
+            # not prose — the model saw the page, and answering on its behalf would license
+            # the full prose treatment on a guess we invented. The exception is a region
+            # the geometry heuristic made a positive claim about (a bullet mark, an
+            # oversized first line): that claim stands on its own evidence and survives.
             by_id = {b.id: b for b in found}
+            claimed = {b.id for b in base.blocks}
+            roles, unnamed = [], 0
             for i, b in enumerate(blocks):
                 if b["id"] in by_id:
-                    roles[i] = by_id[b["id"]].role
+                    roles.append(by_id[b["id"]].role)
+                elif b["id"] in claimed:
+                    roles.append(base.roles[i])
+                else:
+                    roles.append(layout.UNKNOWN)
+                    unnamed += 1
+            if unnamed:
+                warnings.append(f"{unnamed} of {len(blocks)} regions unnamed by the model; "
+                                "left unclassified")
             order = {b["id"]: i for i, b in enumerate(blocks)}
             groups = [[order[i] for i in g if i in order] for g in raw_groups]
             return SemanticResult(roles=roles, groups=[g for g in groups if len(g) > 1],

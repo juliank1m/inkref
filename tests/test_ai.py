@@ -186,24 +186,37 @@ def test_invented_block_id_is_dropped():
     print("  hallucination: unknown id dropped with a warning, the rest still applied")
 
 
-def test_unknown_block_type_becomes_prose():
+def test_unknown_block_type_is_left_unclassified():
+    """An undefined role is not prose. Prose is a positive answer, and acting on one we
+    invented would license the full prose treatment on the strength of a typo."""
     analyzer, _ = analyzer_for(blocks_reply(("L0", "sonnet", 0.95)))
     result = analyzer.analyze(BLOCKS)
     assert result.source == "backboard", result.warnings
-    # the heuristic called L0 a heading; an uninterpretable type overrides it to prose
-    assert result.roles[0] == layout.PARAGRAPH, result.roles
+    assert result.roles[0] == layout.UNKNOWN, result.roles
     assert any("sonnet" in w for w in result.warnings), result.warnings
-    print("  vocabulary: an undefined type is treated as prose instead of raising")
+    print("  vocabulary: an undefined role is left unclassified instead of raising")
 
 
-def test_low_confidence_is_ignored():
+def test_low_confidence_is_left_unclassified():
     analyzer, _ = analyzer_for(blocks_reply(
         ("L2", "equation", 0.95), ("L1", "heading", 0.30)))
     result = analyzer.analyze(BLOCKS)
     assert result.roles[2] == layout.EQUATION, result.roles
-    assert result.roles[1] == FLOOR[1], "a 0.30 label must not override the default"
+    assert result.roles[1] == layout.UNKNOWN, "a 0.30 label must not be believed"
     assert any("below threshold" in w for w in result.warnings), result.warnings
-    print("  confidence: a 0.30 label is left as prose, a 0.95 one is applied")
+    print("  confidence: a 0.30 label is left unclassified, a 0.95 one is applied")
+
+
+def test_regions_the_model_never_mentioned_are_unclassified():
+    """A region the model saw and did not name is unknown — except where the geometry
+    heuristic made a positive claim of its own, which stands on its own evidence."""
+    analyzer, _ = analyzer_for(blocks_reply(("L1", "heading", 0.95)))
+    result = analyzer.analyze(BLOCKS)
+    assert result.roles[1] == layout.HEADING, result.roles
+    assert result.roles[2] == layout.BULLET, "the heuristic's bullet mark must survive"
+    assert result.roles[3] == layout.UNKNOWN, result.roles
+    assert any("unnamed" in w for w in result.warnings), result.warnings
+    print("  coverage: unnamed regions become unknown, heuristic claims survive")
 
 
 def test_transport_failures_fall_back_to_the_heuristic():
@@ -292,8 +305,9 @@ if __name__ == "__main__":
                test_fenced_json_still_parses,
                test_prose_before_the_json_still_parses,
                test_invented_block_id_is_dropped,
-               test_unknown_block_type_becomes_prose,
-               test_low_confidence_is_ignored,
+               test_unknown_block_type_is_left_unclassified,
+               test_low_confidence_is_left_unclassified,
+               test_regions_the_model_never_mentioned_are_unclassified,
                test_transport_failures_fall_back_to_the_heuristic,
                test_auto_without_a_key_is_the_heuristic,
                test_off_disables_the_layer_entirely,
