@@ -37,11 +37,21 @@ DEFAULT_TIMEOUT = 30.0
 def _dotenv(*paths):
     """`KEY=value` lines from a .env file. The real environment always wins.
 
-    A shell `export` does not survive into a separate process, and an API key has to live
-    somewhere that is not the repo, so this reads the two places a key is conventionally
-    put. Both are gitignored; nothing here is ever written back or logged.
+    A shell `export` does not survive into a separate process, so the key has to live in a
+    file for anything but that one shell to see it. Three places are checked, first match
+    wins per key, and a real environment variable still beats all of them:
+
+        ./.env              whatever directory you happen to be in
+        <repo>/.env         so the CLI works when run from anywhere
+        ~/.inkref.env       machine-wide, outside the repo entirely
+
+    The repo path matters: keying only off the working directory means `python3 -m inkref`
+    silently loses the key the moment you run it from somewhere else. Nothing here is ever
+    written back or logged, and both .env paths are gitignored.
     """
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     paths = paths or (os.path.join(os.getcwd(), ".env"),
+                      os.path.join(repo, ".env"),
                       os.path.expanduser("~/.inkref.env"))
     out = {}
     for path in paths:
