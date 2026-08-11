@@ -472,21 +472,62 @@ private func rowsOf(_ boxes: [InkBox], _ refH: Double) -> [[Int]] {
     let tallSet = Set(tall)
     let short = boxes.indices.filter { !tallSet.contains($0) }
 
-    var rows: [[Int]] = []
+    // Each row carries running aggregates instead of being re-measured. Recomputing a
+    // row's baseline and extent for every candidate makes matching
+    // O(strokes x rows x row size) — about 115M operations on a 10,000-stroke page. The
+    // bottoms are kept sorted so the median is an index rather than a sort, which makes
+    // the result identical to the naive version, not an approximation of it.
+    struct Row {
+        var indices: [Int]
+        var y0: Double
+        var y1: Double
+        var tallBottoms: [Double]
+        var allBottoms: [Double]
+
+        init(_ i: Int, _ b: InkBox, tall: Bool) {
+            indices = [i]; y0 = b.y0; y1 = b.y1
+            allBottoms = [b.y1]
+            tallBottoms = tall ? [b.y1] : []
+        }
+
+        mutating func add(_ i: Int, _ b: InkBox, tall: Bool) {
+            indices.append(i)
+            y0 = Swift.min(y0, b.y0)
+            y1 = Swift.max(y1, b.y1)
+            Row.insort(&allBottoms, b.y1)
+            if tall { Row.insort(&tallBottoms, b.y1) }
+        }
+
+        static func insort(_ a: inout [Double], _ v: Double) {
+            var lo = 0, hi = a.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if a[mid] < v { lo = mid + 1 } else { hi = mid }
+            }
+            a.insert(v, at: lo)
+        }
+
+        var baseline: Double {
+            let v = tallBottoms.isEmpty ? allBottoms : tallBottoms
+            let m = v.count / 2
+            return v.count % 2 == 1 ? v[m] : (v[m - 1] + v[m]) / 2
+        }
+    }
+
+    var rows: [Row] = []
     for i in stableSorted(tall, by: { boxes[$0].y1 }) {
         let b = boxes[i]
         var best: Int? = nil
         var bestErr = Double.infinity
         for (r, row) in rows.enumerated() {
-            let rb = baselineOf(row, boxes, refH)
-            let rbox = InkBox.union(row.map { boxes[$0] })
-            let overlap = Swift.min(b.y1, rbox.y1) - Swift.max(b.y0, rbox.y0)
-            let h = Swift.min(b.height, rbox.height)
+            let rb = row.baseline
+            let overlap = Swift.min(b.y1, row.y1) - Swift.max(b.y0, row.y0)
+            let h = Swift.min(b.height, row.y1 - row.y0)
             let err = abs(b.y1 - rb)
             let fits = err <= rowBaselineTol * refH || (h > 0 && overlap / h >= rowOverlap)
             if fits && err < bestErr { best = r; bestErr = err }
         }
-        if let best { rows[best].append(i) } else { rows.append([i]) }
+        if let best { rows[best].add(i, b, tall: true) } else { rows.append(Row(i, b, tall: true)) }
     }
 
     for i in stableSorted(short, by: { boxes[$0].y1 }) {
@@ -494,21 +535,22 @@ private func rowsOf(_ boxes: [InkBox], _ refH: Double) -> [[Int]] {
         var best: Int? = nil
         var bestScore = 0.0
         for (r, row) in rows.enumerated() {
-            let rbox = InkBox.union(row.map { boxes[$0] })
-            let score = Swift.min(b.y1, rbox.y1) - Swift.max(b.y0, rbox.y0)  // overlap, in points
+            let score = Swift.min(b.y1, row.y1) - Swift.max(b.y0, row.y0)
             if score > bestScore { best = r; bestScore = score }
         }
         if best == nil {                                 // not inside any row: nearest one
             var nearest: Int? = nil
             var nearestD = Double.infinity
             for (r, row) in rows.enumerated() {
-                let d = abs(b.centerY - baselineOf(row, boxes, refH))
+                let d = abs(b.centerY - row.baseline)
                 if d <= 1.5 * refH && d < nearestD { nearest = r; nearestD = d }
             }
             best = nearest
         }
-        if let best { rows[best].append(i) } else { rows.append([i]) }
+        if let best { rows[best].add(i, b, tall: false) } else { rows.append(Row(i, b, tall: false)) }
     }
+
+    let grouped = rows.map(\.indices)
 
     // Only now split a row where it crosses a wide horizontal gap. Doing it while building
     // rows makes the result depend on the order strokes arrive in — a stroke at the far
@@ -516,7 +558,7 @@ private func rowsOf(_ boxes: [InkBox], _ refH: Double) -> [[Int]] {
     // of its own. Splitting a finished row cannot go wrong that way.
     let maxGap = rowMaxGap * refH
     var out: [[Int]] = []
-    for row in rows {
+    for row in grouped {
         let ordered = stableSorted(row) { boxes[$0].x0 }
         guard let first = ordered.first else { continue }
         var piece = [first]

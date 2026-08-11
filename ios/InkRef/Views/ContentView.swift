@@ -51,9 +51,14 @@ struct ContentView: View {
             #if DEBUG
             // Lets a screenshot of the result screen be taken without driving the UI, which
             // is how the preview is checked from the command line. Debug builds only.
-            if ProcessInfo.processInfo.arguments.contains("-autoDemo") {
+            let args = ProcessInfo.processInfo.arguments
+            if args.contains("-autoDemo") {
                 await vm.loadSample()
                 await vm.refactor()
+                // `-before` and `-structure` let each view be captured deterministically;
+                // synthetic taps on the simulator are not reliable enough to drive it.
+                if args.contains("-before") { vm.showRefactored = false }
+                if args.contains("-structure") { vm.showStructure = true }
             }
             #endif
         }
