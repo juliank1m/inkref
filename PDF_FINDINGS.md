@@ -128,7 +128,7 @@ Best of all, we can generate the source notebook ourselves with known synthetic 
 
 ## Tooling
 
-`inkport/pdf/` needs a PDF library; the GoodNotes write path stays stdlib-only.
+`inkref/pdf/` needs a PDF library; the GoodNotes write path stays stdlib-only.
 
 - **PyMuPDF** — best fit. `page.get_drawings()` yields per-path dicts with `items`
   (`l`/`c`/`re`/`qu`, Béziers preserved), `color` (stroke), `fill`, `width`, `opacity`,

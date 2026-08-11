@@ -1,6 +1,6 @@
 """Answer the Phase-2 questions about an unknown handwriting PDF.
 
-    python3 -m inkport.pdf.probe file.pdf          (needs venv: pymupdf, pikepdf)
+    python3 -m inkref.pdf.probe file.pdf          (needs venv: pymupdf, pikepdf)
 
 Reports, per page: whether ink lives in annotations or the content stream, whether paths are
 stroked centerlines or filled outlines, and what colour/width/opacity is recoverable.

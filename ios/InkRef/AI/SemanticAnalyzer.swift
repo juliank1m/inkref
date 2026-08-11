@@ -2,7 +2,7 @@ import Foundation
 
 /// Semantic analysis: what is each detected line?
 ///
-/// The rest of InkRefactor depends on `SemanticAnalyzer` and never on Backboard. Two
+/// The rest of InkRef depends on `SemanticAnalyzer` and never on Backboard. Two
 /// implementations satisfy it: `HeuristicAnalyzer` (geometry only, no network, always
 /// available — this is the floor) and `BackboardAnalyzer` (a vision model, with the
 /// heuristic underneath it).

@@ -1,9 +1,9 @@
 """Command line: analyse, beautify and preview a .goodnotes document.
 
-    python3 -m inkport demo                          # make messy notes, then fix them
-    python3 -m inkport analyze notes.goodnotes       # what structure was detected
-    python3 -m inkport beautify notes.goodnotes -o clean.goodnotes --preview clean.html
-    python3 -m inkport preview notes.goodnotes -o compare.html
+    python3 -m inkref demo                          # make messy notes, then fix them
+    python3 -m inkref analyze notes.goodnotes       # what structure was detected
+    python3 -m inkref beautify notes.goodnotes -o clean.goodnotes --preview clean.html
+    python3 -m inkref preview notes.goodnotes -o compare.html
 
 Reading and writing GoodNotes is stdlib only; nothing here needs the venv.
 """
@@ -92,7 +92,7 @@ def cmd_demo(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="inkport", description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(prog="inkref", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def strength_arg(sp):

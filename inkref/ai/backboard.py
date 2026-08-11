@@ -42,7 +42,7 @@ def _dotenv(*paths):
     put. Both are gitignored; nothing here is ever written back or logged.
     """
     paths = paths or (os.path.join(os.getcwd(), ".env"),
-                      os.path.expanduser("~/.inkrefactor.env"))
+                      os.path.expanduser("~/.inkref.env"))
     out = {}
     for path in paths:
         try:
@@ -93,7 +93,7 @@ class Config:
 
 def _multipart(fields, image=None, filename="page.png"):
     """-> (content_type, body). Small enough to hand-roll; one page image, a few fields."""
-    boundary = f"----inkport{uuid.uuid4().hex}"
+    boundary = f"----inkref{uuid.uuid4().hex}"
     out = bytearray()
     for key, value in fields.items():
         out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n"

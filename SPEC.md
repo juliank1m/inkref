@@ -1,10 +1,10 @@
-# InkRefactor — Project Specification
+# InkRef — Project Specification
 
 ## 1. Overview
 
-**InkRefactor** is an iPad-first handwriting formatting tool that cleans and restructures digital handwritten notes while preserving the user's original handwriting as editable ink.
+**InkRef** is an iPad-first handwriting formatting tool that cleans and restructures digital handwritten notes while preserving the user's original handwriting as editable ink.
 
-Instead of converting handwriting into typed text, InkRefactor manipulates the geometry of the original pen strokes.
+Instead of converting handwriting into typed text, InkRef manipulates the geometry of the original pen strokes.
 
 The initial integration targets **Goodnotes** documents.
 
@@ -12,7 +12,7 @@ The core idea is:
 
 > **Prettier for handwriting.**
 
-A user writes notes normally in Goodnotes, sends a page or document to InkRefactor, applies automatic formatting, previews the result, and sends the cleaned document back to Goodnotes.
+A user writes notes normally in Goodnotes, sends a page or document to InkRef, applies automatic formatting, previews the result, and sends the cleaned document back to Goodnotes.
 
 The output should remain native, editable handwriting rather than a PDF, image, or font recreation.
 
@@ -43,7 +43,7 @@ Existing AI note tools usually solve a different problem:
 
 That destroys one of the main reasons users chose handwriting in the first place.
 
-InkRefactor instead performs:
+InkRef instead performs:
 
 **handwriting → structured handwriting → cleaner handwriting**
 
@@ -51,7 +51,7 @@ InkRefactor instead performs:
 
 # 3. Product Vision
 
-InkRefactor should eventually become a general-purpose transformation engine for editable digital ink.
+InkRef should eventually become a general-purpose transformation engine for editable digital ink.
 
 Goodnotes is the first supported format, not the entire product.
 
@@ -60,7 +60,7 @@ Long-term:
 ```text
 Goodnotes ─────┐
 Notability ────┤
-Apple Notes ───┼──► InkRefactor Engine ───► Editable formatted ink
+Apple Notes ───┼──► InkRef Engine ───► Editable formatted ink
 Other formats ─┘
 ```
 
@@ -96,7 +96,7 @@ A student who:
 - does not want AI replacing their handwriting
 - wants notes to look cleaner after writing them
 
-InkRefactor is primarily a **post-note-taking tool**.
+InkRef is primarily a **post-note-taking tool**.
 
 It does not need to operate continuously while the user is writing.
 
@@ -111,7 +111,7 @@ Goodnotes
    ↓
 Export / Share
    ↓
-InkRefactor
+InkRef
    ↓
 Analyze handwriting
    ↓
@@ -130,13 +130,13 @@ The process should feel closer to sending a photo through Lightroom than manuall
 
 # 6. Main Interaction
 
-The initial InkRefactor screen should be extremely simple.
+The initial InkRef screen should be extremely simple.
 
 Example:
 
 ```text
 ┌─────────────────────────────┐
-│        InkRefactor          │
+│        InkRef          │
 │                             │
 │      Lecture 07             │
 │       12 pages              │
@@ -177,7 +177,7 @@ The user should never have to understand how the underlying file format works.
 
 ## Preserve Identity
 
-InkRefactor should modify the **layout of handwriting**, not rewrite the handwriting itself.
+InkRef should modify the **layout of handwriting**, not rewrite the handwriting itself.
 
 For example, if the user wrote:
 
@@ -185,7 +185,7 @@ For example, if the user wrote:
 Neural networks learn weights
 ```
 
-InkRefactor should keep the same strokes that form those letters.
+InkRef should keep the same strokes that form those letters.
 
 It may:
 
@@ -226,7 +226,7 @@ The original document must never be destructively modified.
 
 ### 8.2 Render Page Preview
 
-Render handwriting inside InkRefactor.
+Render handwriting inside InkRef.
 
 The preview should approximately reproduce:
 
@@ -385,7 +385,7 @@ The resulting document should:
 - retain individual editable strokes
 - remain erasable
 - remain lasso-selectable where supported by the file format
-- preserve pages not modified by InkRefactor
+- preserve pages not modified by InkRef
 
 This is the most important technical requirement.
 
@@ -423,11 +423,11 @@ Include:
 
 ---
 
-### Step 2 — Share to InkRefactor
+### Step 2 — Share to InkRef
 
 Export/share the Goodnotes document.
 
-Open it in InkRefactor.
+Open it in InkRef.
 
 ---
 
@@ -442,7 +442,7 @@ For demo purposes, optionally visualize:
 - text groups
 - detected margins
 
-This demonstrates that InkRefactor understands the spatial structure of the notes rather than merely applying an image filter.
+This demonstrates that InkRef understands the spatial structure of the notes rather than merely applying an image filter.
 
 ---
 
@@ -492,7 +492,7 @@ This proves the output is not:
 
 The final demo message:
 
-> InkRefactor doesn't replace your handwriting. It understands its structure and refactors it.
+> InkRef doesn't replace your handwriting. It understands its structure and refactors it.
 
 ---
 
@@ -755,7 +755,7 @@ The deterministic layout engine then performs actual stroke transformations.
 
 # 15. Safety and Data Integrity
 
-InkRefactor modifies personal notes, so destructive behaviour is unacceptable.
+InkRef modifies personal notes, so destructive behaviour is unacceptable.
 
 Requirements:
 
@@ -896,7 +896,7 @@ Optimizers
 
 The user can now add more handwritten content without manually moving dozens of objects.
 
-This could become one of InkRefactor's most important long-term features.
+This could become one of InkRef's most important long-term features.
 
 ---
 
@@ -919,7 +919,7 @@ Adding another paragraph should reposition surrounding objects while preserving 
 # 18. Suggested Repository Structure
 
 ```text
-inkrefactor/
+inkref/
 │
 ├── app/
 │   ├── ui/
@@ -1020,7 +1020,7 @@ Verify:
 
 ## Test 5 — Unsupported Objects
 
-Import a page containing something InkRefactor does not understand.
+Import a page containing something InkRef does not understand.
 
 The unknown object should survive the round trip unchanged.
 
@@ -1035,9 +1035,9 @@ The hackathon MVP is successful if the following sequence works reliably:
 
 2. Export them.
 
-3. Open them in InkRefactor.
+3. Open them in InkRef.
 
-4. InkRefactor automatically identifies handwritten lines.
+4. InkRef automatically identifies handwritten lines.
 
 5. Press Beautify.
 
@@ -1058,7 +1058,7 @@ Everything beyond this is secondary.
 
 # 21. Product Differentiation
 
-InkRefactor should never be marketed simply as:
+InkRef should never be marketed simply as:
 
 > AI that makes notes prettier.
 
@@ -1066,7 +1066,7 @@ That description undersells the project and makes it sound generic.
 
 The core differentiation is:
 
-> **InkRefactor treats handwriting as structured, editable geometry.**
+> **InkRef treats handwriting as structured, editable geometry.**
 
 Traditional AI:
 
@@ -1078,7 +1078,7 @@ handwriting
 typed text
 ```
 
-InkRefactor:
+InkRef:
 
 ```text
 handwriting
@@ -1099,7 +1099,7 @@ Best-fit tracks:
 ### Primary
 **Apps**
 
-InkRefactor is a polished user-facing iPad application.
+InkRef is a polished user-facing iPad application.
 
 ### Secondary
 **Design**
@@ -1123,13 +1123,13 @@ The technical story is stronger:
 
 ### One sentence
 
-**InkRefactor is Prettier for handwriting: it cleans the layout of handwritten digital notes while preserving every stroke as editable ink.**
+**InkRef is Prettier for handwriting: it cleans the layout of handwritten digital notes while preserving every stroke as editable ink.**
 
 ### Short Pitch
 
 People use an Apple Pencil because they want their notes to remain handwritten. But once those notes become messy, existing AI tools usually solve the problem by converting them into typed text.
 
-InkRefactor takes a different approach.
+InkRef takes a different approach.
 
 It understands the spatial structure of a handwritten page—words, lines, margins, headings, and diagrams—and reorganizes the original pen strokes themselves.
 
@@ -1141,10 +1141,10 @@ It just gets refactored.
 
 # 24. Product Philosophy
 
-InkRefactor should follow one rule:
+InkRef should follow one rule:
 
 > **Improve the structure, preserve the expression.**
 
 The imperfections inside someone's handwriting are part of its identity.
 
-The mess around the handwriting is what InkRefactor fixes.
+The mess around the handwriting is what InkRef fixes.

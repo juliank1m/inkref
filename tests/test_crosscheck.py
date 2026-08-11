@@ -21,11 +21,11 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.goodnotes import beautify as bt                    # noqa: E402
-from inkport.goodnotes.document import Document                 # noqa: E402
+from inkref.goodnotes import beautify as bt                    # noqa: E402
+from inkref.goodnotes.document import Document                 # noqa: E402
 
-ENGINE = os.path.join(ROOT, "ios", "InkRefactor", "Engine")
-AI = os.path.join(ROOT, "ios", "InkRefactor", "AI")
+ENGINE = os.path.join(ROOT, "ios", "InkRef", "Engine")
+AI = os.path.join(ROOT, "ios", "InkRef", "AI")
 HARNESS = os.path.join(ROOT, "ios", "Tools", "CrossCheck.swift")
 
 ARCHIVES = sorted(glob.glob(os.path.join(ROOT, "samples", "*.goodnotes")))
@@ -86,7 +86,7 @@ def test_engines_agree(binary):
 
 def python_layout_digest(path, strength="balanced"):
     """The same canonical form ios/Tools/CrossCheck.swift --layout prints."""
-    from inkport.ink import layout
+    from inkref.ink import layout
     doc = Document.open(path)
     s = layout.strength(strength)
     out = [f"layout {os.path.basename(path)} strength={s.name}"]
@@ -149,7 +149,7 @@ def test_swift_beautify_output_is_readable_by_python(binary):
     """
     src = os.path.join(ROOT, "generated", "demo_messy.goodnotes")
     if not os.path.exists(src):
-        print("  swift write: skipped (run `python3 -m inkport demo` first)")
+        print("  swift write: skipped (run `python3 -m inkref demo` first)")
         return
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "swift_beautified.goodnotes")
@@ -176,7 +176,7 @@ def test_swift_beautify_output_is_readable_by_python(binary):
                 "tpl member shape changed"
             assert rec.color == src_rec.color, "colour changed"
             assert rec.deleted == src_rec.deleted, "deletion state changed"
-            from inkport.goodnotes import strokes as sm
+            from inkref.goodnotes import strokes as sm
             ba, bb = sm.bounds(sig_a, mem_a), sm.bounds(sig_b, mem_b)
             if ba is None or bb is None:
                 continue

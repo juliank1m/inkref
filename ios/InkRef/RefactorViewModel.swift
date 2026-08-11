@@ -192,7 +192,7 @@ final class RefactorViewModel {
 
     private nonisolated static func workDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("InkRefactor", isDirectory: true)
+            .appendingPathComponent("InkRef", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -258,7 +258,7 @@ final class RefactorViewModel {
         case let .format(detail):
             return "That doesn't look like a GoodNotes document we can read — \(detail)"
         case let .unsupported(detail):
-            return "This document uses something InkRefactor doesn't handle yet — \(detail)"
+            return "This document uses something InkRef doesn't handle yet — \(detail)"
         case nil:
             return error.localizedDescription
         }

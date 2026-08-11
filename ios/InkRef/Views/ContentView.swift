@@ -21,7 +21,7 @@ struct ContentView: View {
             Group {
                 if vm.pages.isEmpty { importScreen } else { resultScreen }
             }
-            .navigationTitle(vm.pages.isEmpty ? "" : (vm.documentName ?? "InkRefactor"))
+            .navigationTitle(vm.pages.isEmpty ? "" : (vm.documentName ?? "InkRef"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if !vm.pages.isEmpty {
@@ -65,7 +65,7 @@ struct ContentView: View {
         ScrollView {
             VStack(spacing: 28) {
                 VStack(spacing: 10) {
-                    Text("InkRefactor")
+                    Text("InkRef")
                         .font(.system(size: 46, weight: .semibold, design: .serif))
                     Text("Prettier for handwriting. Your strokes, refactored — never redrawn.")
                         .font(.title3)

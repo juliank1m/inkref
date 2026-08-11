@@ -56,7 +56,7 @@ of those edits at once has not been opened in the app. Until it has, 8.10 is not
 |---|---|
 | 1. Write messy notes in GoodNotes | not done — synthetic fixtures stand in (`ink/handwriting.py`); the public samples carry at most 5 strokes |
 | 2. Export them | fine, nothing to build |
-| 3. Open them in InkRefactor | CLI yes; iPad app written, never run |
+| 3. Open them in InkRef | CLI yes; iPad app written, never run |
 | 4. Lines identified automatically | yes, on fixtures |
 | 5. Press Beautify | CLI and HTML preview yes; app written, never run |
 | 6. Baselines, spacing, alignment visibly improve | measured on the demo page: baseline wobble −40%, margin drift −29%, word gaps −30%, pitch −3% |
@@ -152,7 +152,7 @@ Still to do:
 ## Phase 4 — The iPad app
 
 Native SwiftUI, iPad-only, iOS 17, Foundation + SwiftUI only, no packages. The engine is
-ported from `inkport/`: protobuf surgery, Apple LZ4 framing, tpl, records, document, the
+ported from `inkref/`: protobuf surgery, Apple LZ4 framing, tpl, records, document, the
 layout engine, and the same Backboard contract.
 
 - [x] project, iPad-only target, `.goodnotes` imported UTI so documents arrive from Files,
@@ -197,7 +197,7 @@ Still to do:
 
 Apple Notes and Samsung Notes export **raster** PDFs and are dead ends for stroke recovery.
 OneNote exports **filled outlines**, which need skeletonization — a separate, much harder
-pipeline. Notability is probably vector but its structure is unverified. `inkport.pdf.probe`
+pipeline. Notability is probably vector but its structure is unverified. `inkref.pdf.probe`
 answers the decisive question (centerline vs filled outline) for an unknown file in one run.
 
 ---

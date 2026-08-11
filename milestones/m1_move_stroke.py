@@ -11,8 +11,8 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.goodnotes import strokes as strokes_mod          # noqa: E402
-from inkport.goodnotes.document import Document, to_points  # noqa: E402
+from inkref.goodnotes import strokes as strokes_mod          # noqa: E402
+from inkref.goodnotes.document import Document, to_points  # noqa: E402
 
 # test2.goodnotes holds literally one stroke, but it is a zero-length dot 0.35 pt wide —
 # useless for judging "did it move?" by eye. test.goodnotes has one *drawable* stroke

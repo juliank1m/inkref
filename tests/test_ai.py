@@ -5,7 +5,7 @@ Run: python3 tests/test_ai.py     (stdlib only)
 Nothing here opens a socket: BackboardClient takes an `opener` for exactly this reason, so
 every reply — well-formed, fenced, chatty, hallucinated, or an outright transport failure —
 is handed to the parser as canned bytes. The point of the suite is the contract in
-inkport/ai/analyzer.py: `analyze` never raises, and everything the model gets wrong
+inkref/ai/analyzer.py: `analyze` never raises, and everything the model gets wrong
 degrades into the geometry heuristic instead of reaching the layout engine.
 """
 import io
@@ -17,14 +17,14 @@ import urllib.error
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.ai import get_analyzer                                  # noqa: E402
-from inkport.ai.analyzer import BackboardAnalyzer, HeuristicAnalyzer  # noqa: E402
-from inkport.ai.backboard import BackboardClient, Config             # noqa: E402
-from inkport.goodnotes import beautify as bt                         # noqa: E402
-from inkport.goodnotes.document import Document                      # noqa: E402
-from inkport.goodnotes.writer import GoodNotesWriter                 # noqa: E402
-from inkport.ink import handwriting                                  # noqa: E402
-from inkport.ink import layout                                       # noqa: E402
+from inkref.ai import get_analyzer                                  # noqa: E402
+from inkref.ai.analyzer import BackboardAnalyzer, HeuristicAnalyzer  # noqa: E402
+from inkref.ai.backboard import BackboardClient, Config             # noqa: E402
+from inkref.goodnotes import beautify as bt                         # noqa: E402
+from inkref.goodnotes.document import Document                      # noqa: E402
+from inkref.goodnotes.writer import GoodNotesWriter                 # noqa: E402
+from inkref.ink import handwriting                                  # noqa: E402
+from inkref.ink import layout                                       # noqa: E402
 
 KEY = "sk-test-not-a-real-key"
 TEMPLATE = os.path.join(ROOT, "samples", "test.goodnotes")

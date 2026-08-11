@@ -171,7 +171,7 @@ public final class BackboardClient: Sendable {
     /// dependency for that would cost more than it saves.
     static func multipart(fields: [String: String], image: Data,
                           filename: String = "page.png") -> (String, Data) {
-        let boundary = "----inkrefactor\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let boundary = "----inkref\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
         var body = Data()
         func append(_ s: String) { body.append(Data(s.utf8)) }
         for key in fields.keys.sorted() {

@@ -1,4 +1,4 @@
-# InkRefactor
+# InkRef
 
 Cleans up the **layout** of handwritten notes while keeping every stroke as native editable
 ink — lasso-able, movable, erasable, recolourable in GoodNotes. Not typed text, not a
@@ -28,8 +28,8 @@ Pencil ink that real notes are made of.
 
 | | |
 |---|---|
-| `ios/InkRefactor/` | **the shipping product.** Native iPadOS SwiftUI app, whole round trip on device — no server, no laptop. Foundation + SwiftUI only, zero packages. |
-| `inkport/` | **the reference implementation.** Python research harness that established the format, plus a CLI. Stays as the lab: it is where a format question gets answered fastest. |
+| `ios/InkRef/` | **the shipping product.** Native iPadOS SwiftUI app, whole round trip on device — no server, no laptop. Foundation + SwiftUI only, zero packages. |
+| `inkref/` | **the reference implementation.** Python research harness that established the format, plus a CLI. Stays as the lab: it is where a format question gets answered fastest. |
 
 Both speak the same coordinate space and the same layout rules. The Swift engine is a port,
 not a second design.
@@ -54,7 +54,7 @@ stroke, `/InkList` gives the centerline directly, colours survive bit-exact, pla
 lands within one stroke width.
 
 **The Swift engine agrees with the Python one, record for record.**
-`tests/test_crosscheck.py` builds `ios/InkRefactor/Engine` and `AI` with `swiftc` and makes
+`tests/test_crosscheck.py` builds `ios/InkRef/Engine` and `AI` with `swiftc` and makes
 both engines describe the same archives: 5 archives, 1010 strokes, identical geometry,
 colour, width and segments. A document beautified by the Swift engine reads back in Python
 with all 179 records intact, 163 moved, none deformed.
@@ -70,7 +70,7 @@ with all 179 records intact, 163 moved, none deformed.
   cross-checks against Python, but `Views/` and the view model are only ever compiled by
   Xcode, and no round trip has happened on a device.
 - **Real handwriting has never been through the layout engine.** The public samples carry
-  at most five strokes, so everything is tuned against `inkport/ink/handwriting.py`
+  at most five strokes, so everything is tuned against `inkref/ink/handwriting.py`
   fixtures — synthetic messy notes with seeded, known defects.
 - **`run_checks.sh` runs three of the seven suites** — format, IR and PDF. The layout,
   beautify, AI and cross-check suites pass but have to be run by hand (below).
@@ -81,7 +81,7 @@ with all 179 records intact, 163 moved, none deformed.
 ## Run the iPad app
 
 ```sh
-open ios/InkRefactor.xcodeproj
+open ios/InkRef.xcodeproj
 ```
 
 Pick an iPad simulator and run. iPad-only target, iOS 17 deployment, Swift 5, Xcode 26 /
@@ -95,10 +95,10 @@ Files, AirDrop or the GoodNotes share sheet.
 ## Run the Python CLI
 
 ```sh
-python3 -m inkport demo                       # generate messy notes, beautify, preview
-python3 -m inkport analyze notes.goodnotes    # print the detected structure, change nothing
-python3 -m inkport beautify notes.goodnotes -o clean.goodnotes --preview clean.html
-python3 -m inkport preview notes.goodnotes -o compare.html
+python3 -m inkref demo                       # generate messy notes, beautify, preview
+python3 -m inkref analyze notes.goodnotes    # print the detected structure, change nothing
+python3 -m inkref beautify notes.goodnotes -o clean.goodnotes --preview clean.html
+python3 -m inkref preview notes.goodnotes -o compare.html
 ```
 
 Common flags: `-s light|balanced|strong` (how hard to push the layout, default `balanced`),
@@ -121,7 +121,7 @@ python3 tests/test_crosscheck.py                 # Swift engine == Python engine
 python3 milestones/m3_synthetic_stroke.py        # synthetic ink -> .goodnotes
 python3 milestones/m4_stress.py 1000             # stroke-count stress test
 ./venv/bin/python milestones/m5_pdf_roundtrip.py # PDF -> .goodnotes, accuracy measured
-./venv/bin/python -m inkport.pdf.probe file.pdf  # what is in an unknown PDF?
+./venv/bin/python -m inkref.pdf.probe file.pdf  # what is in an unknown PDF?
 ```
 
 The GoodNotes read/write/beautify path is **stdlib only**. PDF work needs `pymupdf`
@@ -147,7 +147,7 @@ allowed to cross that boundary.
 ## API
 
 ```python
-from inkport.goodnotes import beautify
+from inkref.goodnotes import beautify
 
 report = beautify.beautify_file("notes.goodnotes", "clean.goodnotes", "balanced")
 print(report.summary())
@@ -156,7 +156,7 @@ print(report.summary())
 Lower down, the pieces are separable — pure geometry in, offsets out:
 
 ```python
-from inkport.ink import layout
+from inkref.ink import layout
 
 analysis, offsets = layout.beautify(boxes)      # boxes: [(x0, y0, x1, y1)] in points
 ```
@@ -164,8 +164,8 @@ analysis, offsets = layout.beautify(boxes)      # boxes: [(x0, y0, x1, y1)] in p
 And to author ink from scratch:
 
 ```python
-from inkport.ink.model import Color, InkDocument, InkPage, InkStroke
-from inkport.goodnotes.writer import GoodNotesWriter
+from inkref.ink.model import Color, InkDocument, InkPage, InkStroke
+from inkref.goodnotes.writer import GoodNotesWriter
 
 page = InkPage(width=595, height=842)                 # PDF points, y down
 page.add(InkStroke(points=[(100, 100), (160, 100)],

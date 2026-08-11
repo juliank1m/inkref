@@ -8,10 +8,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.goodnotes import strokes as strokes_mod          # noqa: E402
-from inkport.goodnotes.document import Document               # noqa: E402
-from inkport.goodnotes.writer import GoodNotesWriter, TemplateError, reader_to_ink  # noqa: E402
-from inkport.ink.model import Color, InkDocument, InkPage, InkStroke  # noqa: E402
+from inkref.goodnotes import strokes as strokes_mod          # noqa: E402
+from inkref.goodnotes.document import Document               # noqa: E402
+from inkref.goodnotes.writer import GoodNotesWriter, TemplateError, reader_to_ink  # noqa: E402
+from inkref.ink.model import Color, InkDocument, InkPage, InkStroke  # noqa: E402
 
 TEMPLATE = os.path.join(ROOT, "samples", "test.goodnotes")
 OUT = os.path.join(ROOT, "generated", "_ink_test.goodnotes")
@@ -64,8 +64,8 @@ def test_width_scale_is_calibrated():
     every one measured at exactly units/2 points. Regression guard against anyone
     "unifying" this with the 11/6 coordinate scale.
     """
-    from inkport.goodnotes import writer
-    from inkport.goodnotes.document import UNITS_PER_POINT
+    from inkref.goodnotes import writer
+    from inkref.goodnotes.document import UNITS_PER_POINT
     assert writer.WIDTH_UNITS_PER_POINT == 2.0
     assert abs(UNITS_PER_POINT - 11 / 6) < 1e-12
     assert writer.WIDTH_UNITS_PER_POINT != UNITS_PER_POINT
@@ -132,8 +132,8 @@ def test_clear_existing_keeps_everything_that_is_not_a_live_stroke():
     item (image, text box, math group), all of which this code carries as opaque bytes.
     The samples are pure stroke pages, so nothing ever noticed.
     """
-    from inkport.goodnotes import protobuf as pb
-    from inkport.goodnotes import records
+    from inkref.goodnotes import protobuf as pb
+    from inkref.goodnotes import records
 
     doc = Document.open(TEMPLATE)
     page = next(p for p in doc.pages if p.live)

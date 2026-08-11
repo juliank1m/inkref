@@ -169,9 +169,9 @@ def preview_html(in_path, out_path, strength="balanced", title=None,
         raise ValueError(f"{in_path}: no page has enough ink to analyse")
     name = html.escape(title or os.path.basename(in_path))
     body = f"""<meta charset="utf-8"><meta name="viewport"
- content="width=device-width, initial-scale=1"><title>InkRefactor — {name}</title>
+ content="width=device-width, initial-scale=1"><title>InkRef — {name}</title>
 <style>{CSS}</style>
-<header><h1>InkRefactor</h1>
+<header><h1>InkRef</h1>
 <div class="sub">{name} &middot; strength <b>{s.name}</b> &middot; every stroke is the
 original ink, translated — nothing was redrawn</div></header>
 <div class="bar">

@@ -57,7 +57,7 @@ COLUMN_GUTTER = 1.50        # ...and the quiet band must be this wide, x ref_h
 COLUMN_MIN_SHARE = 0.10     # both sides of a cut must hold this share of the strokes
 
 # Semantic roles. Geometry can guess some of these; a vision model can do better (see
-# inkport/ai/). Either way the role only ever selects which deterministic rule applies —
+# inkref/ai/). Either way the role only ever selects which deterministic rule applies —
 # the numbers below, and the transform itself, stay ours.
 PARAGRAPH, HEADING, BULLET, EQUATION, DIAGRAM = (
     "paragraph", "heading", "bullet", "equation", "diagram")
@@ -510,7 +510,7 @@ def plan(a, s=BALANCED, roles=None):
       margin align   (SPEC §8.7)  horizontal, whole line, toward its indent level
       word spacing   (SPEC §8.5)  horizontal, cumulative along the line
 
-    `roles` is one role per line, in `a.lines` order — usually from `inkport.ai`, and
+    `roles` is one role per line, in `a.lines` order — usually from `inkref.ai`, and
     `None` means treat everything as prose. A role never supplies a coordinate; it only
     chooses which of the rules above apply, which is the whole point of the split.
     """

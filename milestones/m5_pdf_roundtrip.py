@@ -16,9 +16,9 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.goodnotes.document import POINTS_PER_UNIT      # noqa: E402
-from inkport.goodnotes.writer import GoodNotesWriter, reader_to_ink  # noqa: E402
-from inkport.pdf import extract as pdf_extract              # noqa: E402
+from inkref.goodnotes.document import POINTS_PER_UNIT      # noqa: E402
+from inkref.goodnotes.writer import GoodNotesWriter, reader_to_ink  # noqa: E402
+from inkref.pdf import extract as pdf_extract              # noqa: E402
 
 PDF = os.path.join(ROOT, "samples", "pdf", "03c_synthetic_stroke.pdf")
 ORIGINAL = os.path.join(ROOT, "generated", "03_synthetic_stroke.goodnotes")

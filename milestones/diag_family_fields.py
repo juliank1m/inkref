@@ -27,11 +27,11 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.goodnotes import ids                       # noqa: E402
-from inkport.goodnotes import protobuf as pb            # noqa: E402
-from inkport.goodnotes import records                   # noqa: E402
-from inkport.goodnotes import strokes as strokes_mod    # noqa: E402
-from inkport.goodnotes.document import Document, Stroke   # noqa: E402
+from inkref.goodnotes import ids                       # noqa: E402
+from inkref.goodnotes import protobuf as pb            # noqa: E402
+from inkref.goodnotes import records                   # noqa: E402
+from inkref.goodnotes import strokes as strokes_mod    # noqa: E402
+from inkref.goodnotes.document import Document, Stroke   # noqa: E402
 
 SOURCE = os.path.join(ROOT, "samples", "test.goodnotes")
 OUTPUT = os.path.join(ROOT, "generated", "diag_family_fields.goodnotes")

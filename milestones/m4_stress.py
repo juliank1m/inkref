@@ -14,10 +14,10 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.goodnotes import records, strokes as strokes_mod   # noqa: E402
-from inkport.goodnotes.document import Document                 # noqa: E402
-from inkport.goodnotes.writer import GoodNotesWriter            # noqa: E402
-from inkport.ink.model import Color, InkDocument, InkPage, InkStroke  # noqa: E402
+from inkref.goodnotes import records, strokes as strokes_mod   # noqa: E402
+from inkref.goodnotes.document import Document                 # noqa: E402
+from inkref.goodnotes.writer import GoodNotesWriter            # noqa: E402
+from inkref.ink.model import Color, InkDocument, InkPage, InkStroke  # noqa: E402
 
 TEMPLATE = os.path.join(ROOT, "samples", "test.goodnotes")
 OUT_DIR = os.path.join(ROOT, "generated")

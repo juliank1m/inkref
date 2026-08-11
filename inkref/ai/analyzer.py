@@ -1,6 +1,6 @@
 """Semantic analysis: what is each detected line?
 
-The rest of InkRefactor depends on `SemanticAnalyzer` — `analyze(blocks, image) ->
+The rest of InkRef depends on `SemanticAnalyzer` — `analyze(blocks, image) ->
 SemanticResult` — and never on Backboard. Two implementations satisfy it:
 
   `HeuristicAnalyzer`  geometry only, no network, always available. This is the floor.

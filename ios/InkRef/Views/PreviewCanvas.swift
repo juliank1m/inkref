@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The web preview's curve (inkport/preview.py): long enough that the eye tracks a word
+/// The web preview's curve (inkref/preview.py): long enough that the eye tracks a word
 /// travelling to its new baseline, short enough that a demo never waits on it.
 extension Animation {
     static let beautify = Animation.timingCurve(0.2, 0.8, 0.25, 1, duration: 0.85)

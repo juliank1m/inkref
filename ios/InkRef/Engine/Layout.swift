@@ -16,7 +16,7 @@ import Foundation
 /// Thresholds are multiples of `refH`, the page's writing height, so the same numbers work
 /// at any pen size or page scale.
 
-// Tunables, all multiples of refH unless noted. These match inkport/ink/layout.py exactly;
+// Tunables, all multiples of refH unless noted. These match inkref/ink/layout.py exactly;
 // a divergence between the two implementations is a bug, not a port decision.
 private let rowBaselineTol = 0.45      // a stroke joins a row if its bottom is this close to it
 private let rowOverlap = 0.50          // ...or if it vertically overlaps the row this much

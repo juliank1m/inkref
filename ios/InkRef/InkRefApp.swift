@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct InkRefactorApp: App {
+struct InkRefApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()

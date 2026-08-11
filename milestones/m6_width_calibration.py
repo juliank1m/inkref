@@ -19,8 +19,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.goodnotes.document import Document, POINTS_PER_UNIT   # noqa: E402
-from inkport.goodnotes.strokes import Stroke                       # noqa: E402
+from inkref.goodnotes.document import Document, POINTS_PER_UNIT   # noqa: E402
+from inkref.goodnotes.strokes import Stroke                       # noqa: E402
 
 TEMPLATE = os.path.join(ROOT, "samples", "test.goodnotes")
 OUTPUT = os.path.join(ROOT, "generated", "06_widths.goodnotes")
@@ -49,7 +49,7 @@ def build():
 
 
 def measure(pdf_path):
-    from inkport.pdf import extract as ex
+    from inkref.pdf import extract as ex
     if ex.fitz is None:
         sys.exit("needs PyMuPDF")
     doc = ex.fitz.open(pdf_path)

@@ -1,6 +1,6 @@
 """Checks for the layout engine: structure detection, the plan, and its guarantees.
 
-Fixtures come from `inkport.ink.handwriting` at a fixed seed, so every number below is
+Fixtures come from `inkref.ink.handwriting` at a fixed seed, so every number below is
 reproducible. Three checks use hand-built boxes instead, because the defect they guard
 against cannot be produced by the synthetic page: a shift large enough to hit the cap,
 a run of corrections big enough to walk a line onto a frozen one, and a zero-height
@@ -15,8 +15,8 @@ from statistics import median
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from inkport.ink import handwriting, layout                    # noqa: E402
-from inkport.ink.handwriting import LECTURE, Mess              # noqa: E402
+from inkref.ink import handwriting, layout                    # noqa: E402
+from inkref.ink.handwriting import LECTURE, Mess              # noqa: E402
 
 SEED = 7
 

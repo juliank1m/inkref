@@ -39,8 +39,8 @@ adapter, not touching the middle.
 
 | | |
 |---|---|
-| `ios/InkRefactor/` | the shipping iPadOS app. Whole round trip on device. Foundation + SwiftUI, no packages. |
-| `inkport/` | the Python reference implementation, research harness and CLI. |
+| `ios/InkRef/` | the shipping iPadOS app. Whole round trip on device. Foundation + SwiftUI, no packages. |
+| `inkref/` | the Python reference implementation, research harness and CLI. |
 
 They are the same design twice, not two designs. When they disagree, the Python one is the
 one that has been run against thousands of real records, and the Swift one is the one that
@@ -55,7 +55,7 @@ imports cleanly and simply never draws. Skipped, not failed, where there is no S
 toolchain, so the Python side stays runnable without Xcode.
 
 ```
-inkport/
+inkref/
   ink/          the intermediate representation and the layout engine.
     model.py      Color, InkStroke, InkPage, InkDocument
     layout.py     structure detection + layout plan. Pure geometry, knows no file format
@@ -85,9 +85,9 @@ milestones/     one script per proven capability; each emits a file for manual i
 tests/          stdlib-only checks, no GoodNotes required (PDF needs pymupdf, the
                 cross-check needs swiftc; both skip rather than fail without them)
 
-ios/InkRefactor/
+ios/InkRef/
   Engine/       Protobuf, AppleLZ4, Geometry, and the format + layout stack ported from
-                inkport/goodnotes/ and inkport/ink/
+                inkref/goodnotes/ and inkref/ink/
   AI/           Backboard transport and the same validated Block contract
   Views/        SwiftUI: import, preview, before/after, export
 ios/Tools/

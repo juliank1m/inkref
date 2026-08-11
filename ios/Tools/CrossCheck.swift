@@ -5,7 +5,7 @@
 // established in FINDINGS is silent — a wrong stroke imports cleanly and never draws. This
 // harness is the thing that notices. It is not part of the app target.
 //
-//   swiftc -O ios/InkRefactor/Engine/*.swift ios/Tools/CrossCheck.swift -o /tmp/crosscheck
+//   swiftc -O ios/InkRef/Engine/*.swift ios/Tools/CrossCheck.swift -o /tmp/crosscheck
 //   /tmp/crosscheck samples/test.goodnotes
 //   /tmp/crosscheck --beautify balanced in.goodnotes out.goodnotes
 
