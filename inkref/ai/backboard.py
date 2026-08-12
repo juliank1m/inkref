@@ -104,6 +104,24 @@ class Config:
         return bool(self.api_key)
 
 
+def _tool_arguments(payload):
+    """-> the arguments string of the first tool call, or None if there was no call.
+
+    Backboard pauses a run at `REQUIRES_ACTION` and hands back `tool_calls`, each with
+    `function.arguments` already shaped to the schema that was sent. There is nothing to
+    execute here — the "tool" exists only to make the model answer in a fixed form, so the
+    run is never resumed and the arguments are the whole answer.
+    """
+    calls = payload.get("tool_calls")
+    if not isinstance(calls, list) or not calls:
+        return None
+    fn = calls[0].get("function") if isinstance(calls[0], dict) else None
+    if not isinstance(fn, dict):
+        return None
+    args = fn.get("arguments")
+    return args if isinstance(args, str) and args.strip() else None
+
+
 def _multipart(fields, image=None, filename="page.png"):
     """-> (content_type, body). Small enough to hand-roll; one page image, a few fields."""
     boundary = f"----inkref{uuid.uuid4().hex}"
@@ -129,11 +147,16 @@ class BackboardClient:
     def available(self):
         return self.config.configured
 
-    def ask(self, content, system=None, image=None):
-        """One stateless turn. -> the model's reply text.
+    def ask(self, content, system=None, image=None, tools=None):
+        """One stateless turn. -> the model's reply text, or a tool call's arguments.
 
         No `thread_id` is ever sent and memory stays off: classifying a page must not
         depend on, or leak into, anything the user asked before.
+
+        `tools` asks Backboard to constrain the answer to a named function's schema
+        instead of trusting prose to contain valid JSON. When the model calls it, the run
+        comes back `REQUIRES_ACTION` with the arguments already shaped, and that string is
+        what is returned — the caller parses one object rather than hunting for one.
         """
         if not self.available:
             raise BackboardError("BACKBOARD_API_KEY is not set")
@@ -148,16 +171,28 @@ class BackboardClient:
         }
         if system:
             fields["system_prompt"] = system
+        if tools:
+            fields["tools"] = tools
 
         url = f"{self.config.base_url}/threads/messages"
         headers = {"X-API-Key": self.config.api_key, "Accept": "application/json"}
         if image:
             # json_output is documented as ignored once files are attached, so it is not
-            # sent here — the reply is parsed leniently instead.
-            ctype, body = _multipart(fields, image)
+            # sent here — the reply is parsed leniently instead. Tools go the same way:
+            # a multipart field cannot carry a nested schema, so a vision call keeps the
+            # prose path and its lenient parser.
+            ctype, body = _multipart({k: v for k, v in fields.items() if k != "tools"},
+                                     image)
         else:
             ctype = "application/json"
-            body = json.dumps({**fields, "stream": False, "json_output": True}).encode()
+            payload = {**fields, "stream": False}
+            # `json_output` and `tools` are mutually exclusive in practice: asking for a
+            # JSON response puts the model in a mode where it answers instead of calling,
+            # and the run comes back with prose in `content` and no `tool_calls` at all.
+            # Measured against the live API — with both set the tool was silently ignored.
+            if not tools:
+                payload["json_output"] = True
+            body = json.dumps(payload).encode()
         headers["Content-Type"] = ctype
 
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -189,6 +224,11 @@ class BackboardClient:
         # carries the model's reply. Reading `message` first parses that status string as
         # the answer, JSON extraction fails, and every call silently falls back to the
         # heuristics — the AI layer looks wired up and does nothing.
+        # A tool call is the answer when one was asked for. `content` is null in that
+        # case, so reading it first would look like an empty reply.
+        call = _tool_arguments(payload)
+        if call is not None:
+            return call
         text = payload.get("content") or payload.get("message")
         if not text:
             raise BackboardError("Backboard returned no message text")

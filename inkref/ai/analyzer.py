@@ -25,8 +25,16 @@ SYSTEM = (
     "Never transcribe, re-read or re-segment the page, and never return coordinates, "
     "positions, spacing or corrections — another system owns all of those and will discard "
     "them. Your entire job is to name what each given region already is. If you cannot "
-    "tell, say 'unknown'; that is a useful answer, not a failure."
+    "tell, say 'unknown'; that is a useful answer, not a failure. When a tool is "
+    "offered, answer by calling it rather than by writing the answer out."
 )
+
+# Appended when the request carries the tool. Measured against the live API: with the tool
+# supplied but unmentioned, the model answers in prose and invents its own field names
+# ("classification", "description"); told to call it, it returns a schema-shaped tool call.
+# The instruction is what turns the tool from decoration into the contract.
+TOOL_INSTRUCTION = ("\n\nCall the classify_regions tool exactly once, passing every "
+                    "region id listed above. Do not write the answer as text.")
 
 PROMPT = """Name what each region of this handwritten page is.
 
@@ -215,18 +223,24 @@ class BackboardAnalyzer:
                               warnings=warnings)
 
     def _one(self, blocks, base, image=None):
+        ids = [b["id"] for b in blocks]
         prompt = PROMPT.format(
             blocks=json.dumps(_compact(blocks), separators=(",", ":")),
             schema=schemas.JSON_SCHEMA_HINT,
             types=", ".join(schemas.BLOCK_TYPES))
-        ids = [b["id"] for b in blocks]
 
         warnings = []
         for attempt in range(self.attempts):
             try:
-                reply = self.client.ask(
-                    prompt if attempt == 0 else prompt + "\nReturn raw JSON only.",
-                    system=SYSTEM, image=image)
+                # The tool carries the schema, so the model is constrained rather than
+                # trusted. A vision call cannot carry one (multipart has nowhere to put a
+                # nested schema), and a provider that ignores tools simply answers in
+                # prose — both land in the same lenient parser below.
+                tools = None if image else schemas.classify_tool(ids)
+                ask = prompt if attempt == 0 else prompt + "\nReturn raw JSON only."
+                if tools:
+                    ask += TOOL_INSTRUCTION
+                reply = self.client.ask(ask, system=SYSTEM, image=image, tools=tools)
                 payload = schemas.extract_json(reply)
                 found, notes = schemas.parse_blocks(reply, ids)
                 raw_groups, group_notes = schemas.parse_groups(payload, ids)

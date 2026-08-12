@@ -41,10 +41,73 @@ ROLE_FOR_TYPE = {
     "sketch": layout.DIAGRAM,
     "formula": layout.EQUATION,
     "title": layout.HEADING,
+    "section_heading": layout.HEADING,
+    "subheading": layout.HEADING,
+    "list_item": layout.BULLET,
+    "bullet": layout.BULLET,
+    "mathematical_expression": layout.EQUATION,
+    "math": layout.EQUATION,
+    "figure": layout.DIAGRAM,
     "other": layout.UNKNOWN,
 }
 
+# A tool call omits `confidence` more often than not: the schema marks it required, but
+# the provider does not enforce the schema — measured against the live API, which happily
+# returned `{"id": "L0", "type": "title"}` and invented role names outside the enum. So
+# the enum and the required list are guidance to the model, not a guarantee to us, and the
+# validation below stays exactly as load-bearing as it was.
+#
+# A missing confidence is treated as this rather than as zero. Calling a named function
+# with a named role is a more deliberate act than mentioning a word in a sentence, and
+# scoring it zero silently discarded every answer a tool call ever gave.
+ASSUMED_CONFIDENCE = 0.6
+
 MIN_CONFIDENCE = 0.55       # below this the deterministic default is the better bet
+
+
+def classify_tool(ids):
+    """The classification request as a function the model must call, not prose to parse.
+
+    Every defence in `parse_blocks` exists because a model asked for JSON in prose returns
+    something *near* JSON: fenced, prefaced, truncated, or shaped how it felt like shaping
+    it. A tool call is schema-constrained by the provider before it ever reaches us — the
+    role has to be one of the listed strings, the confidence has to be a number, and the
+    envelope has to be `{"regions": [...]}`.
+
+    The validation downstream stays exactly as it is. This narrows what has to be defended
+    against; it does not make the boundary optional, and an id that was never issued is
+    still dropped on arrival.
+    """
+    return [{
+        "type": "function",
+        "function": {
+            "name": "classify_regions",
+            "description": ("Record what each already-located region of the page is. "
+                            "Call this exactly once with every region id you were given."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "regions": {
+                        "type": "array",
+                        "description": "One entry per region id, in any order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string",
+                                       "description": "A region id from the list given.",
+                                       "enum": list(ids)},
+                                "role": {"type": "string", "enum": list(BLOCK_TYPES),
+                                         "description": "What that region is."},
+                                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                            },
+                            "required": ["id", "role", "confidence"],
+                        },
+                    },
+                },
+                "required": ["regions"],
+            },
+        },
+    }]
 
 JSON_SCHEMA_HINT = """{
   "regions": [
@@ -190,7 +253,7 @@ def parse_blocks(text, valid_ids, min_confidence=MIN_CONFIDENCE):
             warnings.append(f"{bid}: unrecognised role {btype!r}, left unclassified")
             btype = "unknown"
         try:
-            conf = float(raw.get("confidence", 0.0))
+            conf = float(raw["confidence"]) if "confidence" in raw else ASSUMED_CONFIDENCE
         except (TypeError, ValueError):
             conf = 0.0
         conf = min(max(conf, 0.0), 1.0)
