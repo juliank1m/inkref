@@ -241,17 +241,32 @@ Handwriting-to-LaTeX, summarization, flashcards — all of SPEC §16.
 
 ---
 
+## Backlog
+
+**Assistant-level memory of formatting preferences.** Backboard stores memories against an
+assistant rather than a thread, so what one document learns is available to the next. The
+useful thing to remember is not what the notes *say* — that is the study-assistant product
+SPEC §16 rules out — but how this particular person writes: headings underlined rather than
+enlarged, hanging indents on bullets, a habitual left margin. Fed by what the user undoes,
+which is the only signal in the app that says "you got that wrong".
+
+Deferred deliberately, and the reason is worth keeping: a formatter that adapts to you is
+worth nothing until the formatter works on a real device. Revisit after the round trip is
+proven. If it is built, it must store preferences only — never a line of anyone's notes.
+
 ## Immediate next actions
 
-1. **[needs a person]** Beautify a document, import the result into GoodNotes, then lasso a
-   word and erase part of a letter. This closes SPEC 8.10 and §20 steps 9–10, and it is the
-   only item on this list that cannot be done from a terminal.
-2. **[needs a person]** Write a page of genuinely messy notes in GoodNotes, export it, and
-   run `analyze` on it. Every threshold in `layout.py` is currently tuned against synthetic
-   fixtures.
-3. Import `generated/04_stress_1000.goodnotes` and try lasso/erase — confirms synthetic-stroke
-   interaction and 1000-stroke rendering together.
-4. Build the app in Xcode and run it on a simulator: the engine is cross-checked, the SwiftUI
-   layer has never been through a compiler.
-5. Have `run_checks.sh` run the layout, beautify, AI and cross-check suites too, so the newest
-   code is covered by the default command rather than by remembering to type it.
+1. **[needs a person, blocked]** The physical-device round trip: GoodNotes -> share ->
+   InkRef -> Beautify -> export -> GoodNotes, then lasso, drag and partially erase a moved
+   stroke. This is the only claim in the project that has never been tested on hardware, and
+   it is the one the whole design rests on. Blocked on the iPad appearing over USB and on
+   Developer Mode being enabled.
+2. **[needs a person, blocked]** Real recognition timing on the iPad. The simulator reads a
+   page in about 14s and macOS reads the same tiles in 3.5s, because the simulator has no
+   Neural Engine. Neither number describes the target hardware, so no recognition tuning
+   should be done against them.
+3. Write a page of genuinely messy notes in GoodNotes and run `analyze` on it. The
+   thresholds in `layout.py` are tuned against one real notebook and a synthetic fixture.
+4. Reinstate heading whitespace on real pages. It exists and is tested, but it needs a
+   `heading` role, and the geometry heuristic only names bullets and obvious headings —
+   so on a dense page nothing asks for it.
