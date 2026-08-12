@@ -39,20 +39,27 @@ MESS = hw.Mess(baseline=0.18, spacing=0.45, margin=0.55, pitch=0.26, glyph=0.03)
 # the public template offers exactly one — so rather than ship a real notebook as a
 # container, everything the demo has to show goes on a single sheet: a heading, prose, a
 # bullet list, a stacked fraction and a sketch.
+#
+# Lines are kept under about twenty letters. At this cap height each glyph advances 1.18 of
+# it and a word gap adds most of another, so a line of thirty runs past the right edge of
+# an A4 page before the margin jitter is even applied — and ink hanging off the paper looks
+# like a bug in the app rather than a property of the sample.
 NOTES = [
     (0, "LIMITS AND CONTINUITY"),
     (0, ""),
-    (0, "A LIMIT IS THE VALUE A FUNCTION"),
-    (0, "APPROACHES NEAR A POINT. IT NEED"),
-    (0, "NOT BE DEFINED AT THAT POINT."),
+    (0, "A LIMIT IS THE VALUE"),
+    (0, "A FUNCTION APPROACHES"),
+    (0, "NEAR A POINT. IT NEED"),
+    (0, "NOT BE DEFINED THERE."),
     (0, ""),
     (0, "FOR CONTINUITY WE NEED"),
     (1, "- THE VALUE TO EXIST"),
     (1, "- THE LIMIT TO EXIST"),
     (1, "- THE TWO TO AGREE"),
     (0, ""),
-    (0, "THE DERIVATIVE IS THE LIMIT OF"),
-    (0, "THIS QUOTIENT AS H GOES TO ZERO"),
+    (0, "THE DERIVATIVE IS THE"),
+    (0, "LIMIT OF THIS QUOTIENT"),
+    (0, "AS H GOES TO ZERO"),
 ]
 
 
@@ -107,12 +114,18 @@ def build():
     doc = InkDocument(title="Calculus notes")
     page = hw.page(NOTES, size=15.0, left=64.0, top=88.0, pitch=30.0,
                    mess=MESS, seed=7, color=INK, width=1.4)
-    fraction(page, 96.0, 588.0)
-    sketch(page, 300.0, 700.0, w=210.0, h=120.0)
+    # Both figures live below the prose, which now runs to about y=610. A fraction sitting
+    # under a line of text is not a demonstration of anything except two pieces of ink in
+    # the same place.
+    fraction(page, 96.0, 700.0)
+    sketch(page, 330.0, 800.0, w=210.0, h=120.0)
     # A margin note in a second colour. Every real page has one, and it is also the check
     # that colour survives: if the writer ever re-authored a stroke this would come back
     # black.
-    polys, _ = hw._word("CHECK THIS", 372.0, 300.0, 11.0, __import__("random").Random(9), 0.04)
+    # Out to the right of the bullet list, where nothing else is. Written over a line of
+    # prose it reads as the formatter having collided two pieces of ink, which is the exact
+    # accusation this page exists to disprove.
+    polys, _ = hw._word("CHECK", 470.0, 320.0, 11.0, __import__("random").Random(9), 0.04)
     for p in polys:
         stroke(page, p, color=BLUE, width=1.2)
     doc.add_page(page)
